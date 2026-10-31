@@ -74,6 +74,31 @@ curl -s -X POST localhost:8080/api/auth/register -H "Authorization: Bearer $TOKE
 | `GET /api/doctors/me` (profile linked to the logged-in user) | DOCTOR |
 | `POST /api/doctors`, `PUT /api/doctors/{id}`, `DELETE /api/doctors/{id}` (soft delete) | ADMIN |
 
+| `POST/GET/PUT /api/appointments[/{id}]`, `POST /api/appointments/{id}/cancel` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `GET /api/appointments/me` (appointments of the logged-in doctor) | DOCTOR |
+| `POST /api/appointments/{id}/complete` | ADMIN, or the assigned DOCTOR |
+| `POST /api/appointments/{id}/no-show` | ADMIN, RECEPTIONIST, DOCTOR |
+
+Appointments cannot be deleted; cancelling keeps the history.
+
+### Appointments
+
+* **Status flow:** `SCHEDULED -> COMPLETED | CANCELLED | NO_SHOW`. The other three statuses are final (changing them
+  returns 400). Only `SCHEDULED` appointments can be updated/rescheduled.
+* **Times:** ISO-8601 with offset (e.g. `2026-11-02T09:30:00+02:00`), free duration. `endTime` must be after `startTime`,
+  the start must be in the future and the duration must be within `app.appointments.min-duration` /
+  `max-duration` (defaults `5m` / `8h`, env `APPOINTMENT_MIN_DURATION` / `APPOINTMENT_MAX_DURATION`).
+* **No double booking:** a doctor and a patient can each have only one `SCHEDULED` appointment at any moment.
+  Back-to-back (one ends exactly when the next starts) is fine. Cancelled, completed and no-show appointments free the slot.
+  A clash returns **409** saying whether the doctor or the patient is booked. This is also enforced by PostgreSQL
+  exclusion constraints, so concurrent requests cannot both succeed (the loser gets the same 409).
+* Patient and doctor must exist (404) and be active (400).
+* Search filters: `doctorId`, `patientId`, `status`, `from`/`to` (appointments overlapping that window; encode `+` as `%2B`).
+  Default sort is `startTime` ascending.
+
+> **After pulling this change** reset the local DB (`V1` gained the `btree_gist` extension and the `appointments`
+> table): `docker compose down -v && docker compose up -d --wait`
+
 Doctor search filters: `name`, `licenseNumber`, `specialtyId`, `active` (omitted = active doctors only; `active=false`
 lists soft-deleted ones). A doctor can optionally be linked to a login account via `userId` (must have the DOCTOR role
 and not be linked to another doctor). Specialties are a seeded lookup table (see `V1`).

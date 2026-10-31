@@ -46,6 +46,25 @@ or `*Impl` classes; use `@Slf4j` for logging.
 * A request that is well-formed but breaks a domain rule throws `BusinessRuleException` (400).
 * Search criteria with an `active` flag default to active-only; `active=false` explicitly lists soft-deleted rows.
 
+## Scheduling / overlap rules
+
+* "Two things must not overlap" is enforced **in the database** with a GiST exclusion constraint using half-open
+  `tstzrange(start, end)` ranges, partial (`WHERE status = 'SCHEDULED'`), plus `btree_gist` for the `=` on ids.
+  See `appointments` in `V1`. The service checks first (through `*Specifications`, excluding the entity itself on
+  update) only to give a friendly 409 message; the constraint is what guarantees correctness under concurrency.
+* `GlobalExceptionHandler` maps `DataIntegrityViolationException` to 409 and recognises these constraints by name
+  (`ex_appointments_*_no_overlap`). Name new constraints `ex_<table>_<what>` / `uq_` / `ck_` and add a branch there when
+  the client needs a specific message.
+* Status machines live on the enum (`AppointmentStatus.canTransitionTo`); the service has one private `transition(...)`
+  used by every action endpoint (`POST /{id}/cancel|complete|no-show`). Terminal states reject changes with
+  `BusinessRuleException` (400). Records that must keep history have no DELETE endpoint.
+* Time based rules use the injectable `Clock` bean, never `Instant.now()`, so they can be unit tested. Timestamps are
+  `Instant` / `TIMESTAMPTZ`, exposed as ISO-8601.
+* Rules that depend on the caller (e.g. "only the assigned doctor") are checked in the service (it receives the
+  username and an `admin` flag from the controller) and throw Spring's `AccessDeniedException`, which the handler turns
+  into 403. Configurable limits go in a `@ConfigurationProperties` record (`AppointmentProperties`).
+* Never log personal data (names, national IDs); log ids only.
+
 ## Errors
 
 Throw `ResourceNotFoundException` (404) / `DuplicateResourceException` (409) from services. `GlobalExceptionHandler`
