@@ -81,6 +81,43 @@ curl -s -X POST localhost:8080/api/auth/register -H "Authorization: Bearer $TOKE
 
 Appointments cannot be deleted; cancelling keeps the history.
 
+| Hospitalization endpoint | Roles |
+|---|---|
+| `GET /api/wards[/{id}]`, `GET /api/rooms[/{id}]`, `GET /api/beds[/{id}]` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `POST/PUT /api/wards\|rooms\|beds`, `PATCH .../{id}/deactivate` | ADMIN |
+| `POST /api/hospitalizations` (admit) | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `GET /api/hospitalizations`, `GET /api/hospitalizations/{id}`, `GET /api/hospitalizations/{id}/bed-history` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `GET /api/hospitalizations/me` (stays attended by the logged-in doctor) | DOCTOR |
+| `PUT /api/hospitalizations/{id}` (reason, diagnosis, attending doctor) | ADMIN, DOCTOR |
+| `POST /api/hospitalizations/{id}/transfer` | ADMIN, DOCTOR, NURSE |
+| `POST /api/hospitalizations/{id}/discharge` | ADMIN, or the attending DOCTOR |
+
+### Hospitalizations
+
+* **Structure:** wards (seeded: Cardiology, Internal Medicine, Surgery, Orthopedics, Pediatrics, Intensive Care,
+  Maternity) contain rooms, which contain beds. Rooms and beds are created through the API. Nothing is deleted; wards,
+  rooms and beds are *deactivated*, which is refused while any bed below them is occupied. Bed search filters:
+  `wardId`, `roomId`, `available` (true = nobody in it), `active` (default: active only).
+* **Flow:** `POST /api/hospitalizations` (admit, creates the stay and its first bed assignment) ->
+  `POST .../transfer` (optional, any number of times) -> `POST .../discharge`. Status: `ADMITTED -> DISCHARGED`
+  (final). `admissionTime` / `dischargeTime` default to now and must not be in the future. Only `ADMITTED` stays can be
+  updated or transferred. Hospitalizations and bed assignments are never deleted; `GET .../{id}/bed-history` lists
+  every bed the patient occupied, oldest first.
+* **Occupancy rules:** a bed holds at most one patient at a time and a patient has at most one `ADMITTED` stay.
+  Violations return **409** ("The bed is already occupied" / "The patient already has an active hospitalization").
+  Both are guaranteed by the database (exclusion constraint with open-ended ranges, partial unique index), so
+  concurrent requests cannot both succeed. A transfer closes the old assignment and opens the new one at the same
+  instant. The patient, doctor, bed, room and ward must exist (404) and be active (400).
+* **Appointment link (optional):** `appointmentId` must belong to the same patient and can be linked to only one stay;
+  the appointment's status is never changed automatically.
+* **Privacy:** `diagnosis`, `dischargeNotes` and the transfer `reason` are returned as `null` to users whose roles are
+  only RECEPTIONIST. Clinical text is never logged.
+* Search filters: `patientId`, `doctorId`, `wardId`, `bedId` (the current bed, or the last bed once discharged),
+  `status`, `admittedFrom`, `admittedTo`. Default sort is `admissionTime` descending.
+
+> **After pulling this change** reset the local DB (`V1` gained the wards, rooms, beds, hospitalizations and
+> bed_assignments tables): `docker compose down -v && docker compose up -d --wait`
+
 ### Appointments
 
 * **Status flow:** `SCHEDULED -> COMPLETED | CANCELLED | NO_SHOW`. The other three statuses are final (changing them

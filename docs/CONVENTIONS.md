@@ -65,6 +65,29 @@ or `*Impl` classes; use `@Slf4j` for logging.
   into 403. Configurable limits go in a `@ConfigurationProperties` record (`AppointmentProperties`).
 * Never log personal data (names, national IDs); log ids only.
 
+## Movements, history and open-ended ranges
+
+* Things that move (a patient between beds) are modelled as a **history table** (`bed_assignments`): one row per
+  stay in a place with `start_time` and a nullable `end_time` (null = still there). Never update a row to "move" it:
+  close the old row and open a new one at the same instant. History rows are never deleted.
+* "At most one occupant" is an exclusion constraint where an open row runs to infinity:
+  `tstzrange(start_time, COALESCE(end_time, 'infinity'::timestamptz))`. "At most one open row per owner" and
+  "one active record per patient" are partial unique indexes (`WHERE end_time IS NULL` / `WHERE status = 'ADMITTED'`).
+  Add the matching branch in `GlobalExceptionHandler` for each new constraint name.
+* Soft structure (wards, rooms, beds) is deactivated, never deleted, and deactivation (or moving to another parent) is
+  rejected while an open assignment exists below it. Creating something inside a parent requires an active parent.
+* Fields that are only meaningful per page (like "is this bed occupied?") are computed with ONE extra query for the
+  whole page (see `BedServiceImpl.search`, `HospitalizationServiceImpl.search`), never per row.
+
+## Hiding clinical data by role
+
+* The controller builds a `Caller` (username + roles) from the `Authentication` and passes it to services that return
+  clinical data. `Caller.canSeeClinicalData()` is true for ADMIN/DOCTOR/NURSE; for anyone else the response record's
+  `withoutClinicalData()` nulls the clinical fields. Apply it in the service on EVERY path that returns the record
+  (create, read, search, history), and never log clinical fields (ids only).
+* Services map to the API shape in one private `present(...)` method so redaction cannot be forgotten on a new path.
+* State changes happen after all validation: check the transition first, mutate last.
+
 ## Errors
 
 Throw `ResourceNotFoundException` (404) / `DuplicateResourceException` (409) from services. `GlobalExceptionHandler`
