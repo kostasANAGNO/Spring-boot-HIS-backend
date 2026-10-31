@@ -1,6 +1,7 @@
 package com.kostasanagno.his;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -11,7 +12,17 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.test.web.servlet.ResultActions;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -215,6 +226,229 @@ class HisApplicationIntegrationTest {
                         .content("{\"username\":\"admin\",\"password\":\"wrong\"}"))
                 .andExpect(status().isUnauthorized());
         mockMvc.perform(get("/api/patients")).andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void appointmentFlowWithOverlapRulesRescheduleCancelAndComplete() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long patientA = createPatient(auth, "AP000000001");
+        long patientB = createPatient(auth, "AP000000002");
+        long doctor = createDoctor(auth, "AP-DOC-1");
+        Instant start = futureHour(10);
+
+        // book, then every flavour of overlap on the same doctor / same patient -> 409 with a clear message
+        long first = bookOk(auth, patientA, doctor, start, start.plus(30, ChronoUnit.MINUTES));
+        book(auth, patientB, doctor, start.plus(10, ChronoUnit.MINUTES), start.plus(40, ChronoUnit.MINUTES))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("doctor")));
+        long otherDoctor = createDoctor(auth, "AP-DOC-2");
+        book(auth, patientA, otherDoctor, start.plus(10, ChronoUnit.MINUTES), start.plus(20, ChronoUnit.MINUTES))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("patient")));
+
+        // back-to-back is fine
+        long second = bookOk(auth, patientB, doctor, start.plus(30, ChronoUnit.MINUTES), start.plus(60, ChronoUnit.MINUTES));
+
+        // reschedule the first one (overlapping its own old slot is fine, overlapping the second is not)
+        putAppointment(auth, first, doctor, start.plus(5, ChronoUnit.MINUTES), start.plus(25, ChronoUnit.MINUTES), "Moved")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.reason").value("Moved"));
+        putAppointment(auth, first, doctor, start.plus(20, ChronoUnit.MINUTES), start.plus(40, ChronoUnit.MINUTES), "Clash")
+                .andExpect(status().isConflict());
+
+        // cancel frees the slot, which can then be booked again; terminal states reject further changes
+        mockMvc.perform(post("/api/appointments/" + first + "/cancel").header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"cancellationReason\":\"Patient called\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CANCELLED"));
+        long rebooked = bookOk(auth, patientA, doctor, start, start.plus(30, ChronoUnit.MINUTES));
+        mockMvc.perform(post("/api/appointments/" + first + "/no-show").header("Authorization", auth))
+                .andExpect(status().isBadRequest());
+        putAppointment(auth, first, doctor, start.plus(120, ChronoUnit.MINUTES), start.plus(150, ChronoUnit.MINUTES), "Late")
+                .andExpect(status().isBadRequest());
+
+        // complete (admin), then search with filters and a window
+        mockMvc.perform(post("/api/appointments/" + second + "/complete").header("Authorization", auth))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("COMPLETED"));
+        mockMvc.perform(get("/api/appointments").param("doctorId", String.valueOf(doctor))
+                        .param("status", "SCHEDULED").param("from", start.toString())
+                        .param("to", start.plus(2, ChronoUnit.HOURS).toString()).header("Authorization", auth))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].id").value(rebooked))
+                .andExpect(jsonPath("$.content[0].doctor.specialty").value("Cardiology"));
+        mockMvc.perform(get("/api/appointments/" + rebooked).header("Authorization", auth))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.patient.id").value(patientA));
+        mockMvc.perform(delete("/api/appointments/" + rebooked).header("Authorization", auth))
+                .andExpect(status().is4xxClientError());
+
+        // validation rules
+        book(auth, patientA, doctor, Instant.now().minus(1, ChronoUnit.DAYS),
+                Instant.now().minus(1, ChronoUnit.DAYS).plus(30, ChronoUnit.MINUTES)).andExpect(status().isBadRequest());
+        book(auth, 999999L, doctor, futureHour(14), futureHour(14).plus(30, ChronoUnit.MINUTES))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
+    void onlyTheAssignedDoctorCanCompleteAndSeesOwnAppointments() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "AP000000003");
+        for (String name : List.of("dr.assigned", "dr.other")) {
+            mockMvc.perform(post("/api/auth/register").header("Authorization", admin)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("""
+                                    {"username":"%s","email":"%s@his.local","password":"Sup3rSecret!",
+                                     "fullName":"Dr X","roles":["DOCTOR"]}""".formatted(name, name)))
+                    .andExpect(status().isCreated());
+        }
+        long assignedUser = userId("dr.assigned");
+        long otherUser = userId("dr.other");
+        long assigned = createDoctorLinked(admin, "AP-DOC-3", assignedUser);
+        createDoctorLinked(admin, "AP-DOC-4", otherUser);
+        Instant start = futureHour(16);
+        long appointment = bookOk(admin, patient, assigned, start, start.plus(30, ChronoUnit.MINUTES));
+
+        String otherToken = "Bearer " + login("dr.other", "Sup3rSecret!");
+        mockMvc.perform(post("/api/appointments/" + appointment + "/complete").header("Authorization", otherToken))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/appointments/me").header("Authorization", otherToken))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(0));
+
+        String assignedToken = "Bearer " + login("dr.assigned", "Sup3rSecret!");
+        mockMvc.perform(get("/api/appointments/me").header("Authorization", assignedToken))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1));
+        mockMvc.perform(post("/api/appointments/" + appointment + "/complete").header("Authorization", assignedToken))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("COMPLETED"));
+        mockMvc.perform(get("/api/appointments/me").header("Authorization", admin)).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void databaseExclusionConstraintsRejectOverlapsButNotBackToBackOrCancelled() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long patientA = createPatient(auth, "AP000000004");
+        long patientB = createPatient(auth, "AP000000005");
+        long doctor = createDoctor(auth, "AP-DOC-5");
+        Instant start = futureHour(18);
+        Instant mid = start.plus(30, ChronoUnit.MINUTES);
+        Instant end = start.plus(60, ChronoUnit.MINUTES);
+
+        insertAppointment(patientA, doctor, start, mid, "SCHEDULED");
+        insertAppointment(patientB, doctor, mid, end, "SCHEDULED");              // back-to-back: allowed
+        insertAppointment(patientB, doctor, start, end, "CANCELLED");            // not SCHEDULED: ignored
+
+        assertThatThrownBy(() -> insertAppointment(patientB, doctor, start.plus(10, ChronoUnit.MINUTES),
+                start.plus(20, ChronoUnit.MINUTES), "SCHEDULED"))                // same doctor
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ex_appointments_doctor_no_overlap");
+        long otherDoctor = createDoctor(auth, "AP-DOC-6");
+        assertThatThrownBy(() -> insertAppointment(patientA, otherDoctor, start.plus(10, ChronoUnit.MINUTES),
+                start.plus(20, ChronoUnit.MINUTES), "SCHEDULED"))                // same patient
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ex_appointments_patient_no_overlap");
+        assertThatThrownBy(() -> insertAppointment(patientA, otherDoctor, end.plus(1, ChronoUnit.HOURS), end,
+                "SCHEDULED"))                                                    // end before start
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_appointments_time_order");
+    }
+
+    @Test
+    void concurrentBookingsOfTheSameDoctorAndTimeYieldExactlyOneSuccess() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long doctor = createDoctor(auth, "AP-DOC-7");
+        int requests = 6;
+        List<Long> patients = new ArrayList<>();
+        for (int i = 0; i < requests; i++) {
+            patients.add(createPatient(auth, "AP00000010" + i));
+        }
+        Instant start = futureHour(20);
+        Instant end = start.plus(30, ChronoUnit.MINUTES);
+
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (long patient : patients) {
+                Callable<Integer> booking = () -> {
+                    ready.countDown();
+                    go.await();
+                    return book(auth, patient, doctor, start, end).andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(booking));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 201).hasSize(1);
+            assertThat(statuses).filteredOn(code -> code == 409).hasSize(requests - 1);
+        } finally {
+            pool.shutdownNow();
+        }
+        Integer scheduled = jdbc.queryForObject(
+                "SELECT count(*) FROM appointments WHERE doctor_id = ? AND status = 'SCHEDULED'", Integer.class, doctor);
+        assertThat(scheduled).isEqualTo(1);
+    }
+
+    // ---- helpers for the appointment tests -----------------------------------------------------
+
+    private static Instant futureHour(int hourOfDay) {
+        return Instant.now().plus(10, ChronoUnit.DAYS).truncatedTo(ChronoUnit.DAYS).plus(hourOfDay, ChronoUnit.HOURS);
+    }
+
+    private long createPatient(String auth, String nationalId) throws Exception {
+        String body = """
+                {"firstName":"Test","lastName":"Patient","dateOfBirth":"1990-01-01","gender":"OTHER","nationalId":"%s"}"""
+                .formatted(nationalId);
+        return idOf(mockMvc.perform(post("/api/patients").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isCreated()));
+    }
+
+    private long createDoctor(String auth, String license) throws Exception {
+        return createDoctorLinked(auth, license, null);
+    }
+
+    private long createDoctorLinked(String auth, String license, Long userId) throws Exception {
+        String body = """
+                {"firstName":"Test","lastName":"Doctor","licenseNumber":"%s","specialtyId":1,"userId":%s}"""
+                .formatted(license, userId);
+        return idOf(mockMvc.perform(post("/api/doctors").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body)).andExpect(status().isCreated()));
+    }
+
+    private long userId(String username) {
+        return jdbc.queryForObject("SELECT id FROM users WHERE username = ?", Long.class, username);
+    }
+
+    private ResultActions book(String auth, long patientId, long doctorId, Instant start, Instant end) throws Exception {
+        String body = """
+                {"patientId":%d,"doctorId":%d,"startTime":"%s","endTime":"%s","reason":"Checkup"}"""
+                .formatted(patientId, doctorId, start, end);
+        return mockMvc.perform(post("/api/appointments").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private long bookOk(String auth, long patientId, long doctorId, Instant start, Instant end) throws Exception {
+        return idOf(book(auth, patientId, doctorId, start, end).andExpect(status().isCreated()));
+    }
+
+    private ResultActions putAppointment(String auth, long id, long doctorId, Instant start, Instant end, String reason)
+            throws Exception {
+        String body = """
+                {"doctorId":%d,"startTime":"%s","endTime":"%s","reason":"%s"}""".formatted(doctorId, start, end, reason);
+        return mockMvc.perform(put("/api/appointments/" + id).header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private long idOf(ResultActions result) throws Exception {
+        return objectMapper.readTree(result.andReturn().getResponse().getContentAsString()).get("id").asLong();
+    }
+
+    private void insertAppointment(long patientId, long doctorId, Instant start, Instant end, String status) {
+        jdbc.update("""
+                INSERT INTO appointments (patient_id, doctor_id, start_time, end_time, status, reason, created_at, updated_at)
+                VALUES (?, ?, ?::timestamptz, ?::timestamptz, ?, 'Checkup', now(), now())""",
+                patientId, doctorId, start.toString(), end.toString(), status);
     }
 
     private String login(String username, String password) throws Exception {
