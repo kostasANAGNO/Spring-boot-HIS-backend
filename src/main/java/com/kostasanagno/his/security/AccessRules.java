@@ -7,6 +7,8 @@ public final class AccessRules {
     public static final String DOCTOR_ONLY = "hasRole('DOCTOR')";
     public static final String COMPLETE_APPOINTMENT = "hasAnyRole('ADMIN','DOCTOR')";
     public static final String MARK_NO_SHOW = "hasAnyRole('ADMIN','RECEPTIONIST','DOCTOR')";
+    public static final String ADMIN_OR_DOCTOR = "hasAnyRole('ADMIN','DOCTOR')";
+    public static final String CLINICAL_STAFF = "hasAnyRole('ADMIN','DOCTOR','NURSE')";
     public static final String ANY_STAFF = "hasAnyRole('ADMIN','DOCTOR','NURSE','RECEPTIONIST')";
 
     private AccessRules() {
