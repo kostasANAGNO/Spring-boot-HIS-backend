@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -449,6 +450,378 @@ class HisApplicationIntegrationTest {
                 INSERT INTO appointments (patient_id, doctor_id, start_time, end_time, status, reason, created_at, updated_at)
                 VALUES (?, ?, ?::timestamptz, ?::timestamptz, ?, 'Checkup', now(), now())""",
                 patientId, doctorId, start.toString(), end.toString(), status);
+    }
+
+    // ---- hospitalizations ----------------------------------------------------------------------
+
+    @Test
+    void wardsAreSeededAndStructureCanBeManaged() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+
+        mockMvc.perform(get("/api/wards").header("Authorization", auth))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(7));
+        long ward = wardId("Surgery");
+        long room = createRoom(auth, ward, "S-100");
+        createBed(auth, room, "A");
+        mockMvc.perform(post("/api/beds").header("Authorization", auth).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"roomId\":" + room + ",\"bedNumber\":\"a\"}"))
+                .andExpect(status().isConflict());
+        mockMvc.perform(post("/api/rooms").header("Authorization", auth).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"wardId\":" + ward + ",\"roomNumber\":\"S-100\"}"))
+                .andExpect(status().isConflict());
+        mockMvc.perform(get("/api/beds").param("roomId", String.valueOf(room)).header("Authorization", auth))
+                .andExpect(jsonPath("$.content[0].wardName").value("Surgery"))
+                .andExpect(jsonPath("$.content[0].roomNumber").value("S-100"))
+                .andExpect(jsonPath("$.content[0].occupied").value(false));
+    }
+
+    @Test
+    void hospitalizationFlowAdmitTransferDischargeWithOccupancyRules() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long ward = wardId("Cardiology");
+        long room = createRoom(auth, ward, "C-100");
+        long bed1 = createBed(auth, room, "1");
+        long bed2 = createBed(auth, room, "2");
+        long patientA = createPatient(auth, "HZ000000001");
+        long patientB = createPatient(auth, "HZ000000002");
+        long doctor = createDoctor(auth, "HZ-DOC-1");
+
+        long stayA = idOf(admit(auth, patientA, doctor, bed1).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.currentBed.id").value(bed1))
+                .andExpect(jsonPath("$.currentBed.wardName").value("Cardiology"))
+                .andExpect(jsonPath("$.diagnosis").value("Suspected angina")));
+
+        // bed occupied, patient already admitted
+        admit(auth, patientB, doctor, bed1).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("bed")));
+        admit(auth, patientA, doctor, bed2).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("patient")));
+
+        // availability filter and occupied flag
+        mockMvc.perform(get("/api/beds").param("roomId", String.valueOf(room)).param("available", "true")
+                        .header("Authorization", auth))
+                .andExpect(jsonPath("$.totalElements").value(1)).andExpect(jsonPath("$.content[0].id").value(bed2));
+        mockMvc.perform(get("/api/beds/" + bed1).header("Authorization", auth))
+                .andExpect(jsonPath("$.occupied").value(true));
+
+        // cannot deactivate occupied structure
+        mockMvc.perform(patch("/api/beds/" + bed1 + "/deactivate").header("Authorization", auth))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/rooms/" + room + "/deactivate").header("Authorization", auth))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(patch("/api/wards/" + ward + "/deactivate").header("Authorization", auth))
+                .andExpect(status().isBadRequest());
+
+        // transfer A to bed 2 (and the same bed is rejected), then B takes the freed bed 1
+        transfer(auth, stayA, bed1).andExpect(status().isBadRequest());
+        transfer(auth, stayA, bed2).andExpect(status().isOk())
+                .andExpect(jsonPath("$.currentBed.id").value(bed2));
+        long stayB = idOf(admit(auth, patientB, doctor, bed1).andExpect(status().isCreated()));
+        transfer(auth, stayA, bed1).andExpect(status().isConflict());
+
+        // search: by ward + status, by bed
+        mockMvc.perform(get("/api/hospitalizations").param("wardId", String.valueOf(ward))
+                        .param("status", "ADMITTED").param("patientId", String.valueOf(patientA))
+                        .header("Authorization", auth))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].currentBed.id").value(bed2));
+        mockMvc.perform(get("/api/hospitalizations").param("bedId", String.valueOf(bed1))
+                        .header("Authorization", auth))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].id").value(stayB));
+
+        // update while admitted
+        mockMvc.perform(put("/api/hospitalizations/" + stayA).header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"attendingDoctorId\":" + doctor + ",\"admissionReason\":\"Chest pain\","
+                                + "\"diagnosis\":\"Confirmed angina\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.diagnosis").value("Confirmed angina"));
+
+        // receptionists never see clinical text
+        long receptionistUser = registerUser(auth, "recep.hz", "RECEPTIONIST");
+        String receptionist = "Bearer " + login("recep.hz", "Sup3rSecret!");
+        mockMvc.perform(get("/api/hospitalizations/" + stayA).header("Authorization", receptionist))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.diagnosis").doesNotExist())
+                .andExpect(jsonPath("$.admissionReason").value("Chest pain"));
+        mockMvc.perform(get("/api/hospitalizations").param("patientId", String.valueOf(patientA))
+                        .header("Authorization", receptionist))
+                .andExpect(jsonPath("$.content[0].diagnosis").doesNotExist());
+        mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", receptionist)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"x\"}"))
+                .andExpect(status().isForbidden());
+        assertThat(receptionistUser).isPositive();
+
+        // discharge A: assignment closed, status final, no more changes, bed history has both beds
+        mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISCHARGED"))
+                .andExpect(jsonPath("$.currentBed").doesNotExist())
+                .andExpect(jsonPath("$.dischargeNotes").value("Recovered"));
+        mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"again\"}"))
+                .andExpect(status().isBadRequest());
+        transfer(auth, stayA, bed2).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/hospitalizations/" + stayA + "/bed-history").header("Authorization", auth))
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].bed.id").value(bed1))
+                .andExpect(jsonPath("$[0].endTime").exists())
+                .andExpect(jsonPath("$[1].bed.id").value(bed2))
+                .andExpect(jsonPath("$[1].endTime").exists());
+        mockMvc.perform(get("/api/hospitalizations/" + stayA + "/bed-history").header("Authorization", receptionist))
+                .andExpect(jsonPath("$[1].reason").doesNotExist());
+
+        // the discharged stay is still searchable by its last bed; the freed bed can be used again
+        mockMvc.perform(get("/api/hospitalizations").param("bedId", String.valueOf(bed2))
+                        .param("status", "DISCHARGED").header("Authorization", auth))
+                .andExpect(jsonPath("$.totalElements").value(1));
+        long patientC = createPatient(auth, "HZ000000003");
+        admit(auth, patientC, doctor, bed2).andExpect(status().isCreated());
+        mockMvc.perform(delete("/api/hospitalizations/" + stayA).header("Authorization", auth))
+                .andExpect(status().is4xxClientError());
+    }
+
+    @Test
+    void onlyTheAttendingDoctorCanDischargeAndSeesOwnHospitalizations() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(admin, wardId("Orthopedics"), "O-100");
+        long bed = createBed(admin, room, "1");
+        long patient = createPatient(admin, "HZ000000010");
+        long attendingUser = registerUser(admin, "dr.attending", "DOCTOR");
+        long otherUser = registerUser(admin, "dr.hz.other", "DOCTOR");
+        long attending = createDoctorLinked(admin, "HZ-DOC-2", attendingUser);
+        createDoctorLinked(admin, "HZ-DOC-3", otherUser);
+        long stay = idOf(admit(admin, patient, attending, bed).andExpect(status().isCreated()));
+
+        String other = "Bearer " + login("dr.hz.other", "Sup3rSecret!");
+        mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", other)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"x\"}"))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/hospitalizations/me").header("Authorization", other))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(0));
+
+        String mine = "Bearer " + login("dr.attending", "Sup3rSecret!");
+        mockMvc.perform(get("/api/hospitalizations/me").header("Authorization", mine))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].id").value(stay));
+        mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", mine)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/hospitalizations/me").header("Authorization", admin)).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void appointmentLinkRules() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(auth, wardId("Pediatrics"), "P-100");
+        long bed1 = createBed(auth, room, "1");
+        long bed2 = createBed(auth, room, "2");
+        long patientA = createPatient(auth, "HZ000000020");
+        long patientB = createPatient(auth, "HZ000000021");
+        long doctor = createDoctor(auth, "HZ-DOC-4");
+        Instant start = futureHour(22);
+        long appointmentOfA = bookOk(auth, patientA, doctor, start, start.plus(30, ChronoUnit.MINUTES));
+
+        admitWithAppointment(auth, patientB, doctor, bed1, appointmentOfA).andExpect(status().isBadRequest());
+        admitWithAppointment(auth, patientA, doctor, bed1, appointmentOfA).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.appointmentId").value(appointmentOfA));
+        // the appointment itself is untouched, and it cannot be linked twice
+        mockMvc.perform(get("/api/appointments/" + appointmentOfA).header("Authorization", auth))
+                .andExpect(jsonPath("$.status").value("SCHEDULED"));
+        admitWithAppointment(auth, patientB, doctor, bed2, appointmentOfA).andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void databaseConstraintsForBedOccupancyAndSingleActiveStay() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(auth, wardId("Maternity"), "M-100");
+        long bed = createBed(auth, room, "1");
+        long patientA = createPatient(auth, "HZ000000030");
+        long patientB = createPatient(auth, "HZ000000031");
+        long doctor = createDoctor(auth, "HZ-DOC-5");
+        long stayA = idOf(admit(auth, patientA, doctor, bed).andExpect(status().isCreated()));
+        long stayB = insertHospitalization(patientB, doctor, "ADMITTED", "now() - interval '1 hour'", null);
+
+        // second open assignment for the same bed / same stay
+        assertThatThrownBy(() -> insertAssignment(stayB, bed, "now()", null))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ex_bed_assignments_bed_no_overlap");
+        // a closed range inside A's open-ended (runs to infinity) occupancy is rejected too ...
+        assertThatThrownBy(() -> insertAssignment(stayB, bed, "now() + interval '1 hour'",
+                "now() + interval '2 hours'"))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ex_bed_assignments_bed_no_overlap");
+        // ... while a range that ended before A arrived is history and does not collide
+        insertAssignment(stayB, bed, "now() - interval '30 minutes'", "now() - interval '10 minutes'");
+        // a second active stay for the same patient
+        assertThatThrownBy(() -> insertHospitalization(patientA, doctor, "ADMITTED", "now()", null))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("uq_hospitalizations_patient_admitted");
+        // a discharged stay needs a discharge time and vice versa
+        assertThatThrownBy(() -> insertHospitalization(patientA, doctor, "DISCHARGED", "now() - interval '2 hours'", null))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_hospitalizations_discharged_iff_discharge_time");
+
+        // after A is discharged the bed is free again for B's stay
+        mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                .andExpect(status().isOk());
+        insertAssignment(stayB, bed, "now() + interval '1 second'", null);
+        // and A can be admitted again later (history rows do not block a new stay)
+        Integer open = jdbc.queryForObject(
+                "SELECT count(*) FROM bed_assignments WHERE bed_id = ? AND end_time IS NULL", Integer.class, bed);
+        assertThat(open).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentAdmissionsToTheSameBedYieldExactlyOneSuccess() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(auth, wardId("Internal Medicine"), "IM-100");
+        long bed = createBed(auth, room, "1");
+        long doctor = createDoctor(auth, "HZ-DOC-6");
+        int requests = 6;
+        List<Long> patients = new ArrayList<>();
+        for (int i = 0; i < requests; i++) {
+            patients.add(createPatient(auth, "HZ00000004" + i));
+        }
+
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (long patient : patients) {
+                Callable<Integer> admission = () -> {
+                    ready.countDown();
+                    go.await();
+                    return admit(auth, patient, doctor, bed).andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(admission));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 201).hasSize(1);
+            assertThat(statuses).filteredOn(code -> code == 409).hasSize(requests - 1);
+        } finally {
+            pool.shutdownNow();
+        }
+        Integer open = jdbc.queryForObject(
+                "SELECT count(*) FROM bed_assignments WHERE bed_id = ? AND end_time IS NULL", Integer.class, bed);
+        assertThat(open).isEqualTo(1);
+        // the losing admissions were rolled back completely: one hospitalization in total for these patients
+        Integer stays = jdbc.queryForObject("SELECT count(*) FROM hospitalizations WHERE patient_id = ANY (?)",
+                Integer.class, (Object) patients.toArray(Long[]::new));
+        assertThat(stays).isEqualTo(1);
+    }
+
+    @Test
+    void concurrentAdmissionsOfTheSamePatientYieldExactlyOneSuccess() throws Exception {
+        String auth = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(auth, wardId("Intensive Care"), "ICU-100");
+        long doctor = createDoctor(auth, "HZ-DOC-7");
+        long patient = createPatient(auth, "HZ000000050");
+        int requests = 4;
+        List<Long> beds = new ArrayList<>();
+        for (int i = 0; i < requests; i++) {
+            beds.add(createBed(auth, room, "B" + i));
+        }
+
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (long bed : beds) {
+                Callable<Integer> admission = () -> {
+                    ready.countDown();
+                    go.await();
+                    return admit(auth, patient, doctor, bed).andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(admission));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 201).hasSize(1);
+            assertThat(statuses).filteredOn(code -> code == 409).hasSize(requests - 1);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    // ---- helpers for the hospitalization tests -------------------------------------------------
+
+    private long wardId(String name) {
+        return jdbc.queryForObject("SELECT id FROM wards WHERE name = ?", Long.class, name);
+    }
+
+    private long createRoom(String auth, long wardId, String number) throws Exception {
+        return idOf(mockMvc.perform(post("/api/rooms").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"wardId\":%d,\"roomNumber\":\"%s\"}".formatted(wardId, number)))
+                .andExpect(status().isCreated()));
+    }
+
+    private long createBed(String auth, long roomId, String number) throws Exception {
+        return idOf(mockMvc.perform(post("/api/beds").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"roomId\":%d,\"bedNumber\":\"%s\"}".formatted(roomId, number)))
+                .andExpect(status().isCreated()));
+    }
+
+    private long registerUser(String auth, String username, String role) throws Exception {
+        mockMvc.perform(post("/api/auth/register").header("Authorization", auth)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"username":"%s","email":"%s@his.local","password":"Sup3rSecret!",
+                                 "fullName":"Test User","roles":["%s"]}""".formatted(username, username, role)))
+                .andExpect(status().isCreated());
+        return userId(username);
+    }
+
+    private ResultActions admit(String auth, long patientId, long doctorId, long bedId) throws Exception {
+        String body = """
+                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionReason":"Chest pain",
+                 "diagnosis":"Suspected angina"}""".formatted(patientId, doctorId, bedId);
+        return mockMvc.perform(post("/api/hospitalizations").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private ResultActions admitWithAppointment(String auth, long patientId, long doctorId, long bedId,
+            long appointmentId) throws Exception {
+        String body = """
+                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionReason":"Follow-up",
+                 "appointmentId":%d}""".formatted(patientId, doctorId, bedId, appointmentId);
+        return mockMvc.perform(post("/api/hospitalizations").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private ResultActions transfer(String auth, long hospitalizationId, long bedId) throws Exception {
+        return mockMvc.perform(post("/api/hospitalizations/" + hospitalizationId + "/transfer")
+                .header("Authorization", auth).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"bedId\":%d,\"reason\":\"Needs monitoring\"}".formatted(bedId)));
+    }
+
+    private long insertHospitalization(long patientId, long doctorId, String status, String admissionSql,
+            String dischargeSql) {
+        return jdbc.queryForObject("INSERT INTO hospitalizations (patient_id, attending_doctor_id, status, "
+                + "admission_time, discharge_time, admission_reason, created_at, updated_at) VALUES (?, ?, ?, "
+                + admissionSql + ", " + (dischargeSql == null ? "NULL" : dischargeSql)
+                + ", 'Direct insert', now(), now()) RETURNING id", Long.class, patientId, doctorId, status);
+    }
+
+    private void insertAssignment(long hospitalizationId, long bedId, String startSql, String endSql) {
+        jdbc.update("INSERT INTO bed_assignments (hospitalization_id, bed_id, start_time, end_time, created_at, "
+                + "updated_at) VALUES (?, ?, " + startSql + ", " + (endSql == null ? "NULL" : endSql)
+                + ", now(), now())", hospitalizationId, bedId);
     }
 
     private String login(String username, String password) throws Exception {
