@@ -45,7 +45,15 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
 
     @ExceptionHandler(DataIntegrityViolationException.class)
     ResponseEntity<ApiError> handleDataIntegrity(DataIntegrityViolationException ex, HttpServletRequest request) {
-        log.warn("Data integrity violation on {}: {}", request.getRequestURI(), ex.getMostSpecificCause().getMessage());
+        String cause = String.valueOf(ex.getMostSpecificCause().getMessage());
+        log.warn("Data integrity violation on {}: {}", request.getRequestURI(), cause);
+        // Safety net for concurrent bookings: the exclusion constraints in V1 reject the second insert
+        if (cause.contains("ex_appointments_doctor_no_overlap")) {
+            return build(HttpStatus.CONFLICT, "The doctor is already booked during the requested time", request);
+        }
+        if (cause.contains("ex_appointments_patient_no_overlap")) {
+            return build(HttpStatus.CONFLICT, "The patient is already booked during the requested time", request);
+        }
         return build(HttpStatus.CONFLICT, "The request conflicts with existing data", request);
     }
 
