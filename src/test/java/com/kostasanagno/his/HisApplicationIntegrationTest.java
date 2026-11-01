@@ -491,7 +491,8 @@ class HisApplicationIntegrationTest {
                 .andExpect(jsonPath("$.currentBed.id").value(bed1))
                 .andExpect(jsonPath("$.currentBed.wardName").value("Main Wing"))
                 .andExpect(jsonPath("$.currentBed.clinicName").value("Cardiology"))
-                .andExpect(jsonPath("$.diagnosis").value("Suspected angina")));
+                .andExpect(jsonPath("$.admission.initialDiagnosis").value("Suspected angina"))
+                .andExpect(jsonPath("$.admission.admissionType").value("EMERGENCY")));
 
         // bed occupied, patient already admitted
         admit(auth, patientB, doctor, bed1).andExpect(status().isConflict())
@@ -536,33 +537,37 @@ class HisApplicationIntegrationTest {
         mockMvc.perform(put("/api/hospitalizations/" + stayA).header("Authorization", auth)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"attendingDoctorId\":" + doctor + ",\"admissionReason\":\"Chest pain\","
-                                + "\"diagnosis\":\"Confirmed angina\"}"))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.diagnosis").value("Confirmed angina"));
+                                + "\"initialDiagnosis\":\"Confirmed angina\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.admission.initialDiagnosis").value("Confirmed angina"))
+                .andExpect(jsonPath("$.admission.admissionType").value("EMERGENCY"));
 
         // receptionists never see clinical text
         long receptionistUser = registerUser(auth, "recep.hz", "RECEPTIONIST");
         String receptionist = "Bearer " + login("recep.hz", "Sup3rSecret!");
         mockMvc.perform(get("/api/hospitalizations/" + stayA).header("Authorization", receptionist))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.diagnosis").doesNotExist())
-                .andExpect(jsonPath("$.admissionReason").value("Chest pain"));
+                .andExpect(jsonPath("$.admission.initialDiagnosis").doesNotExist())
+                .andExpect(jsonPath("$.admission.reason").value("Chest pain"))
+                .andExpect(jsonPath("$.admission.admissionType").value("EMERGENCY"));
         mockMvc.perform(get("/api/hospitalizations").param("patientId", String.valueOf(patientA))
                         .header("Authorization", receptionist))
-                .andExpect(jsonPath("$.content[0].diagnosis").doesNotExist());
+                .andExpect(jsonPath("$.content[0].admission.initialDiagnosis").doesNotExist());
         mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", receptionist)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"x\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"x\"}"))
                 .andExpect(status().isForbidden());
         assertThat(receptionistUser).isPositive();
 
         // discharge A: assignment closed, status final, no more changes, bed history has both beds
         mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("DISCHARGED"))
                 .andExpect(jsonPath("$.currentBed").doesNotExist())
-                .andExpect(jsonPath("$.dischargeNotes").value("Recovered"));
+                .andExpect(jsonPath("$.discharge.summary").value("Recovered"))
+                .andExpect(jsonPath("$.discharge.dischargeType").value("HOME"));
         mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"again\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"again\"}"))
                 .andExpect(status().isBadRequest());
         transfer(auth, stayA, bed2).andExpect(status().isBadRequest());
         mockMvc.perform(get("/api/hospitalizations/" + stayA + "/bed-history").header("Authorization", auth))
@@ -585,6 +590,123 @@ class HisApplicationIntegrationTest {
     }
 
     @Test
+    void admissionAndDischargeRecordsAreSeparateDocumentsWithTheirOwnRules() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        registerUser(admin, "recep.docs", "RECEPTIONIST");
+        String receptionist = "Bearer " + login("recep.docs", "Sup3rSecret!");
+        long room = createRoom(admin, wardId("Pediatrics"), "P-DOC1");
+        long bed = createBed(admin, room, "1");
+        long patient = createPatient(admin, "DC000000001");
+        long doctor = createDoctor(admin, "DC-DOC-1");
+
+        // the admission record has its own rules
+        String base = "{\"patientId\":%d,\"attendingDoctorId\":%d,\"bedId\":%d,\"admissionReason\":\"Fracture\","
+                .formatted(patient, doctor, bed);
+        postAdmission(admin, base + "\"admissionType\":\"TRANSFER_IN\",\"admissionSource\":\"REFERRAL\"}")
+                .andExpect(status().isBadRequest());                                  // transfer-in needs the facility
+        postAdmission(admin, base + "\"admissionType\":\"ELECTIVE\",\"admissionSource\":\"APPOINTMENT\"}")
+                .andExpect(status().isBadRequest());                                  // appointment source needs a link
+        postAdmission(admin, base + "\"admissionType\":\"ELECTIVE\"}").andExpect(status().isBadRequest());
+        long stay = idOf(postAdmission(admin, base + "\"admissionType\":\"TRANSFER_IN\","
+                + "\"admissionSource\":\"REFERRAL\",\"referringFacility\":\"General Hospital of Patras\","
+                + "\"initialDiagnosisCode\":\"s72.0\",\"initialDiagnosis\":\"Femur fracture\"}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.admission.admissionType").value("TRANSFER_IN"))
+                .andExpect(jsonPath("$.admission.referringFacility").value("General Hospital of Patras"))
+                .andExpect(jsonPath("$.admission.initialDiagnosisCode").value("S72.0"))
+                .andExpect(jsonPath("$.discharge").doesNotExist()));
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM admission_records WHERE hospitalization_id = ?",
+                Integer.class, stay)).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM discharge_records WHERE hospitalization_id = ?",
+                Integer.class, stay)).isZero();
+
+        // the discharge record has its own rules too, and a refused discharge leaves the stay admitted
+        discharge(admin, stay, "{\"dischargeType\":\"TRANSFER_OUT\",\"summary\":\"x\"}").andExpect(status().isBadRequest());
+        discharge(admin, stay, "{\"dischargeType\":\"HOME\",\"destinationFacility\":\"X\",\"summary\":\"x\"}")
+                .andExpect(status().isBadRequest());
+        discharge(admin, stay, "{\"dischargeType\":\"DECEASED\",\"followUpDate\":\"2999-01-01\",\"summary\":\"x\"}")
+                .andExpect(status().isBadRequest());
+        discharge(admin, stay, "{\"dischargeType\":\"HOME\",\"followUpDate\":\"2000-01-01\",\"summary\":\"x\"}")
+                .andExpect(status().isBadRequest());
+        discharge(admin, stay, "{\"dischargeType\":\"HOME\"}").andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/hospitalizations/" + stay).header("Authorization", admin))
+                .andExpect(jsonPath("$.status").value("ADMITTED")).andExpect(jsonPath("$.discharge").doesNotExist());
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM discharge_records WHERE hospitalization_id = ?",
+                Integer.class, stay)).isZero();
+
+        discharge(admin, stay, "{\"dischargeType\":\"TRANSFER_OUT\",\"destinationFacility\":\"University Hospital\","
+                + "\"finalDiagnosisCode\":\"s72.0\",\"finalDiagnosis\":\"Femur fracture, operated\","
+                + "\"summary\":\"Operated successfully\",\"instructions\":\"No weight bearing\","
+                + "\"followUpDate\":\"2999-01-01\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("DISCHARGED"))
+                .andExpect(jsonPath("$.discharge.dischargeType").value("TRANSFER_OUT"))
+                .andExpect(jsonPath("$.discharge.destinationFacility").value("University Hospital"))
+                .andExpect(jsonPath("$.discharge.finalDiagnosisCode").value("S72.0"))
+                .andExpect(jsonPath("$.discharge.followUpDate").value("2999-01-01"))
+                .andExpect(jsonPath("$.admission.reason").value("Fracture"));
+
+        // the clinical parts of both documents are hidden from receptionists, the administrative parts are not
+        mockMvc.perform(get("/api/hospitalizations/" + stay).header("Authorization", receptionist))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.admission.reason").value("Fracture"))
+                .andExpect(jsonPath("$.admission.admissionType").value("TRANSFER_IN"))
+                .andExpect(jsonPath("$.admission.initialDiagnosis").doesNotExist())
+                .andExpect(jsonPath("$.admission.initialDiagnosisCode").doesNotExist())
+                .andExpect(jsonPath("$.discharge.dischargeType").value("TRANSFER_OUT"))
+                .andExpect(jsonPath("$.discharge.followUpDate").value("2999-01-01"))
+                .andExpect(jsonPath("$.discharge.summary").doesNotExist())
+                .andExpect(jsonPath("$.discharge.finalDiagnosis").doesNotExist())
+                .andExpect(jsonPath("$.discharge.instructions").doesNotExist());
+
+        // lists carry both documents (loaded for the whole page at once)
+        mockMvc.perform(get("/api/hospitalizations").param("patientId", String.valueOf(patient))
+                        .header("Authorization", admin))
+                .andExpect(jsonPath("$.content[0].admission.referringFacility").value("General Hospital of Patras"))
+                .andExpect(jsonPath("$.content[0].discharge.summary").value("Operated successfully"));
+
+        // the documents are protected by the database as well
+        assertThatThrownBy(() -> jdbc.update("UPDATE discharge_records SET summary = 'tampered' WHERE hospitalization_id = ?", stay))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM discharge_records WHERE hospitalization_id = ?", stay))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("UPDATE admission_records SET reason = 'tampered' WHERE hospitalization_id = ?", stay))
+                .hasMessageContaining("cannot be changed");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM admission_records WHERE hospitalization_id = ?", stay))
+                .hasMessageContaining("not allowed");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO discharge_records (hospitalization_id, discharge_type, summary, "
+                + "created_at, updated_at) VALUES (?, 'HOME', 'second', now(), now())", stay))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("uq_discharge_records_hospitalization");
+
+        // every stay needs its admission record, a discharged stay its discharge record (checked at commit)
+        long other = createPatient(admin, "DC000000002");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO hospitalizations (patient_id, attending_doctor_id, status, "
+                + "admission_time, created_at, updated_at) VALUES (?, ?, 'ADMITTED', now(), now(), now())", other, doctor))
+                .hasMessageContaining("has no admission record");
+        long stay2 = insertHospitalization(other, doctor, "ADMITTED", "now() - interval '1 hour'", null);
+        assertThatThrownBy(() -> jdbc.update("UPDATE hospitalizations SET status = 'DISCHARGED', discharge_time = now() "
+                + "WHERE id = ?", stay2)).hasMessageContaining("has no discharge record");
+        assertThat(jdbc.queryForObject("SELECT status FROM hospitalizations WHERE id = ?", String.class, stay2))
+                .isEqualTo("ADMITTED");
+        // a record-keeping problem on one table cannot hide the typed rules of another
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO discharge_records (hospitalization_id, discharge_type, summary, "
+                + "created_at, updated_at) VALUES (?, 'TRANSFER_OUT', 'x', now(), now())", stay2))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_discharge_records_destination");
+    }
+
+    private ResultActions postAdmission(String auth, String json) throws Exception {
+        return mockMvc.perform(post("/api/hospitalizations").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(json));
+    }
+
+    private ResultActions discharge(String auth, long hospitalizationId, String json) throws Exception {
+        return mockMvc.perform(post("/api/hospitalizations/" + hospitalizationId + "/discharge")
+                .header("Authorization", auth).contentType(MediaType.APPLICATION_JSON).content(json));
+    }
+
+    @Test
     void onlyTheAttendingDoctorCanDischargeAndSeesOwnHospitalizations() throws Exception {
         String admin = "Bearer " + login("admin", "Admin123!");
         long room = createRoom(admin, wardId("Orthopedics"), "O-100");
@@ -598,7 +720,7 @@ class HisApplicationIntegrationTest {
 
         String other = "Bearer " + login("dr.hz.other", "Sup3rSecret!");
         mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", other)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"x\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"x\"}"))
                 .andExpect(status().isForbidden());
         mockMvc.perform(get("/api/hospitalizations/me").header("Authorization", other))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(0));
@@ -608,7 +730,7 @@ class HisApplicationIntegrationTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1))
                 .andExpect(jsonPath("$.content[0].id").value(stay));
         mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", mine)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
                 .andExpect(status().isOk());
         mockMvc.perform(get("/api/hospitalizations/me").header("Authorization", admin)).andExpect(status().isForbidden());
     }
@@ -667,7 +789,7 @@ class HisApplicationIntegrationTest {
 
         // after A is discharged the bed is free again for B's stay
         mockMvc.perform(post("/api/hospitalizations/" + stayA + "/discharge").header("Authorization", auth)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
                 .andExpect(status().isOk());
         insertAssignment(stayB, bed, "now() + interval '1 second'", null);
         // and A can be admitted again later (history rows do not block a new stay)
@@ -830,7 +952,7 @@ class HisApplicationIntegrationTest {
                         .content("{\"clinicId\":%d,\"name\":\"Moved Wing\"}".formatted(clinicId("Cardiology"))))
                 .andExpect(status().isBadRequest());                                    // occupied: cannot move
         mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", admin)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
                 .andExpect(status().isOk());
         mockMvc.perform(get("/api/hospitalizations").param("clinicId", String.valueOf(clinic)).param("status", "DISCHARGED")
                         .header("Authorization", nurse))
@@ -953,14 +1075,15 @@ class HisApplicationIntegrationTest {
         Instant admittedAt = Instant.now().minus(50, ChronoUnit.HOURS);
         long stay = idOf(mockMvc.perform(post("/api/hospitalizations").header("Authorization", admin)
                         .contentType(MediaType.APPLICATION_JSON)
-                        .content(("{\"patientId\":%d,\"attendingDoctorId\":%d,\"bedId\":%d,\"admissionReason\":\"Surgery\","
+                        .content(("{\"patientId\":%d,\"attendingDoctorId\":%d,\"bedId\":%d,\"admissionType\":\"ELECTIVE\","
+                                + "\"admissionSource\":\"OTHER\",\"admissionReason\":\"Surgery\","
                                 + "\"admissionTime\":\"%s\"}").formatted(patient, doctor, bed, admittedAt)))
                 .andExpect(status().isCreated()));
 
         mockMvc.perform(post("/api/invoices/from-hospitalization/" + stay).header("Authorization", admin))
                 .andExpect(status().isBadRequest());   // still admitted
         mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", admin)
-                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
                 .andExpect(status().isOk());
 
         // 50 hours = 3 started days x 150.00
@@ -1488,8 +1611,9 @@ class HisApplicationIntegrationTest {
 
     private ResultActions admit(String auth, long patientId, long doctorId, long bedId) throws Exception {
         String body = """
-                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionReason":"Chest pain",
-                 "diagnosis":"Suspected angina"}""".formatted(patientId, doctorId, bedId);
+                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionType":"EMERGENCY",
+                 "admissionSource":"EMERGENCY_DEPARTMENT","admissionReason":"Chest pain",
+                 "initialDiagnosisCode":"i20.9","initialDiagnosis":"Suspected angina"}""".formatted(patientId, doctorId, bedId);
         return mockMvc.perform(post("/api/hospitalizations").header("Authorization", auth)
                 .contentType(MediaType.APPLICATION_JSON).content(body));
     }
@@ -1497,7 +1621,8 @@ class HisApplicationIntegrationTest {
     private ResultActions admitWithAppointment(String auth, long patientId, long doctorId, long bedId,
             long appointmentId) throws Exception {
         String body = """
-                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionReason":"Follow-up",
+                {"patientId":%d,"attendingDoctorId":%d,"bedId":%d,"admissionType":"ELECTIVE",
+                 "admissionSource":"APPOINTMENT","admissionReason":"Follow-up",
                  "appointmentId":%d}""".formatted(patientId, doctorId, bedId, appointmentId);
         return mockMvc.perform(post("/api/hospitalizations").header("Authorization", auth)
                 .contentType(MediaType.APPLICATION_JSON).content(body));
@@ -1509,12 +1634,15 @@ class HisApplicationIntegrationTest {
                 .content("{\"bedId\":%d,\"reason\":\"Needs monitoring\"}".formatted(bedId)));
     }
 
+    /** Inserts a stay together with its admission record in ONE statement (every stay must have one at commit). */
     private long insertHospitalization(long patientId, long doctorId, String status, String admissionSql,
             String dischargeSql) {
-        return jdbc.queryForObject("INSERT INTO hospitalizations (patient_id, attending_doctor_id, status, "
-                + "admission_time, discharge_time, admission_reason, created_at, updated_at) VALUES (?, ?, ?, "
-                + admissionSql + ", " + (dischargeSql == null ? "NULL" : dischargeSql)
-                + ", 'Direct insert', now(), now()) RETURNING id", Long.class, patientId, doctorId, status);
+        return jdbc.queryForObject("WITH h AS (INSERT INTO hospitalizations (patient_id, attending_doctor_id, status, "
+                + "admission_time, discharge_time, created_at, updated_at) VALUES (?, ?, ?, " + admissionSql + ", "
+                + (dischargeSql == null ? "NULL" : dischargeSql) + ", now(), now()) RETURNING id), "
+                + "a AS (INSERT INTO admission_records (hospitalization_id, admission_type, admission_source, reason, "
+                + "created_at, updated_at) SELECT id, 'ELECTIVE', 'OTHER', 'Direct insert', now(), now() FROM h) "
+                + "SELECT id FROM h", Long.class, patientId, doctorId, status);
     }
 
     private void insertAssignment(long hospitalizationId, long bedId, String startSql, String endSql) {

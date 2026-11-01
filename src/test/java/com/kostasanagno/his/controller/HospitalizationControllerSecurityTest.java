@@ -13,11 +13,14 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.kostasanagno.his.config.SecurityConfig;
+import com.kostasanagno.his.dto.AdmissionRecordResponse;
 import com.kostasanagno.his.dto.BedAssignmentResponse;
 import com.kostasanagno.his.dto.BedSummary;
 import com.kostasanagno.his.dto.DoctorSummary;
 import com.kostasanagno.his.dto.HospitalizationResponse;
 import com.kostasanagno.his.dto.PatientSummary;
+import com.kostasanagno.his.entity.AdmissionSource;
+import com.kostasanagno.his.entity.AdmissionType;
 import com.kostasanagno.his.entity.HospitalizationStatus;
 import com.kostasanagno.his.entity.Role;
 import com.kostasanagno.his.exception.GlobalExceptionHandler;
@@ -51,11 +54,12 @@ import org.springframework.test.web.servlet.MockMvc;
 class HospitalizationControllerSecurityTest {
 
     private static final String ADMIT_JSON = """
-            {"patientId":1,"attendingDoctorId":2,"bedId":3,"admissionReason":"Chest pain"}""";
+            {"patientId":1,"attendingDoctorId":2,"bedId":3,"admissionType":"EMERGENCY",
+             "admissionSource":"EMERGENCY_DEPARTMENT","admissionReason":"Chest pain"}""";
     private static final String UPDATE_JSON = """
-            {"attendingDoctorId":2,"admissionReason":"Chest pain","diagnosis":"Angina"}""";
+            {"attendingDoctorId":2,"admissionReason":"Chest pain","initialDiagnosis":"Angina"}""";
     private static final String TRANSFER_JSON = "{\"bedId\":4}";
-    private static final String DISCHARGE_JSON = "{\"dischargeNotes\":\"Recovered\"}";
+    private static final String DISCHARGE_JSON = "{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}";
 
     @Autowired
     private MockMvc mockMvc;
@@ -69,8 +73,10 @@ class HospitalizationControllerSecurityTest {
     private static HospitalizationResponse hospitalization() {
         return new HospitalizationResponse(1L, new PatientSummary(1L, "Maria Papadopoulou"),
                 new DoctorSummary(2L, "Gregory House", "Cardiology"), new BedSummary(3L, "A", "101", "Main Wing", "Cardiology"),
-                null, HospitalizationStatus.ADMITTED, Instant.parse("2030-01-01T00:00:00Z"), null, "Chest pain",
-                "Angina", null, Instant.now(), Instant.now());
+                null, HospitalizationStatus.ADMITTED, Instant.parse("2030-01-01T00:00:00Z"), null,
+                new AdmissionRecordResponse(AdmissionType.EMERGENCY, AdmissionSource.EMERGENCY_DEPARTMENT, null,
+                        "Chest pain", "I20.9", "Angina"),
+                null, Instant.now(), Instant.now());
     }
 
     private void stubService() {
@@ -213,7 +219,19 @@ class HospitalizationControllerSecurityTest {
                         .contentType(MediaType.APPLICATION_JSON).content("{\"admissionReason\":\"\"}"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.validationErrors[?(@.field=='patientId')]").exists())
-                .andExpect(jsonPath("$.validationErrors[?(@.field=='bedId')]").exists());
+                .andExpect(jsonPath("$.validationErrors[?(@.field=='bedId')]").exists())
+                .andExpect(jsonPath("$.validationErrors[?(@.field=='admissionType')]").exists())
+                .andExpect(jsonPath("$.validationErrors[?(@.field=='admissionSource')]").exists());
+        mockMvc.perform(post("/api/hospitalizations").with(user("u").roles("NURSE"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(ADMIT_JSON.replace("\"admissionReason\":\"Chest pain\"",
+                                "\"admissionReason\":\"x\",\"initialDiagnosisCode\":\"not-a-code\"")))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.validationErrors[?(@.field=='initialDiagnosisCode')]").exists());
+        mockMvc.perform(post("/api/hospitalizations/1/discharge").with(user("u").roles("ADMIN"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"summary\":\"x\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.validationErrors[?(@.field=='dischargeType')]").exists());
         mockMvc.perform(post("/api/hospitalizations/1/discharge").with(user("u").roles("ADMIN"))
                         .contentType(MediaType.APPLICATION_JSON).content("{}"))
                 .andExpect(status().isBadRequest());
