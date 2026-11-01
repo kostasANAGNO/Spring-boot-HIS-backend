@@ -8,9 +8,14 @@ import com.kostasanagno.his.dto.HospitalizationResponse;
 import com.kostasanagno.his.dto.HospitalizationSearchCriteria;
 import com.kostasanagno.his.dto.HospitalizationUpdateRequest;
 import com.kostasanagno.his.dto.TransferRequest;
+import com.kostasanagno.his.entity.AdmissionRecord;
+import com.kostasanagno.his.entity.AdmissionSource;
+import com.kostasanagno.his.entity.AdmissionType;
 import com.kostasanagno.his.entity.Appointment;
 import com.kostasanagno.his.entity.Bed;
 import com.kostasanagno.his.entity.BedAssignment;
+import com.kostasanagno.his.entity.DischargeRecord;
+import com.kostasanagno.his.entity.DischargeType;
 import com.kostasanagno.his.entity.Doctor;
 import com.kostasanagno.his.entity.Hospitalization;
 import com.kostasanagno.his.entity.HospitalizationStatus;
@@ -20,9 +25,11 @@ import com.kostasanagno.his.exception.DuplicateResourceException;
 import com.kostasanagno.his.exception.ResourceNotFoundException;
 import com.kostasanagno.his.mapper.BedMapper;
 import com.kostasanagno.his.mapper.HospitalizationMapper;
+import com.kostasanagno.his.repository.AdmissionRecordRepository;
 import com.kostasanagno.his.repository.AppointmentRepository;
 import com.kostasanagno.his.repository.BedAssignmentRepository;
 import com.kostasanagno.his.repository.BedRepository;
+import com.kostasanagno.his.repository.DischargeRecordRepository;
 import com.kostasanagno.his.repository.DoctorRepository;
 import com.kostasanagno.his.repository.HospitalizationRepository;
 import com.kostasanagno.his.repository.HospitalizationSpecifications;
@@ -31,7 +38,10 @@ import com.kostasanagno.his.security.Caller;
 import com.kostasanagno.his.service.HospitalizationService;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -45,8 +55,9 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * The checks here only produce friendly messages; the database guarantees correctness under concurrency
- * (bed exclusion constraint, one ADMITTED stay per patient, one open assignment per stay).
- * Only ids are logged: never names, diagnoses or notes.
+ * (bed exclusion constraint, one ADMITTED stay per patient, one open assignment per stay, every stay has its
+ * admission record and every discharged stay its discharge record). Only ids are logged: never names, diagnoses
+ * or summaries.
  */
 @Slf4j
 @Service
@@ -57,6 +68,8 @@ public class HospitalizationServiceImpl implements HospitalizationService {
     private static final String RESOURCE = "Hospitalization";
 
     private final HospitalizationRepository hospitalizationRepository;
+    private final AdmissionRecordRepository admissionRecordRepository;
+    private final DischargeRecordRepository dischargeRecordRepository;
     private final BedAssignmentRepository bedAssignmentRepository;
     private final PatientRepository patientRepository;
     private final DoctorRepository doctorRepository;
@@ -73,6 +86,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         if (admissionTime.isAfter(now)) {
             throw new BusinessRuleException("admissionTime must not be in the future");
         }
+        validateAdmissionDocument(request);
         Patient patient = findActivePatient(request.patientId());
         Doctor doctor = findActiveDoctor(request.attendingDoctorId());
         Bed bed = findUsableBed(request.bedId());
@@ -89,21 +103,28 @@ public class HospitalizationServiceImpl implements HospitalizationService {
                 .appointment(appointment)
                 .status(HospitalizationStatus.ADMITTED)
                 .admissionTime(admissionTime)
-                .admissionReason(request.admissionReason().trim())
-                .diagnosis(request.diagnosis())
+                .build());
+        AdmissionRecord admission = admissionRecordRepository.saveAndFlush(AdmissionRecord.builder()
+                .hospitalization(hospitalization)
+                .admissionType(request.admissionType())
+                .admissionSource(request.admissionSource())
+                .referringFacility(clean(request.referringFacility()))
+                .reason(request.admissionReason().trim())
+                .initialDiagnosisCode(cleanCode(request.initialDiagnosisCode()))
+                .initialDiagnosis(clean(request.initialDiagnosis()))
                 .build());
         BedAssignment assignment = openAssignment(hospitalization, bed, admissionTime, null);
         log.info("Admitted hospitalization {} (patient {}, doctor {}, bed {})", hospitalization.getId(),
                 patient.getId(), doctor.getId(), bed.getId());
-        return present(hospitalization, assignment, caller);
+        return present(hospitalization, assignment, admission, null, caller);
     }
 
     @Override
     @Transactional(readOnly = true)
     public HospitalizationResponse getById(Long id, Caller caller) {
         Hospitalization hospitalization = find(id);
-        BedAssignment current = bedAssignmentRepository.findByHospitalizationIdAndEndTimeIsNull(id).orElse(null);
-        return present(hospitalization, current, caller);
+        return present(hospitalization, currentAssignment(id), admissionRecordOf(id), dischargeRecordOf(hospitalization),
+                caller);
     }
 
     @Override
@@ -122,11 +143,18 @@ public class HospitalizationServiceImpl implements HospitalizationService {
             Caller caller) {
         Page<Hospitalization> page = hospitalizationRepository
                 .findAll(HospitalizationSpecifications.from(criteria), pageable);
-        // current beds of the whole page in one query
-        Map<Long, BedAssignment> current = page.isEmpty() ? Map.of() : bedAssignmentRepository
-                .findByHospitalizationIdInAndEndTimeIsNull(page.getContent().stream().map(Hospitalization::getId).toList())
-                .stream().collect(Collectors.toMap(a -> a.getHospitalization().getId(), Function.identity()));
-        return page.map(h -> present(h, current.get(h.getId()), caller));
+        if (page.isEmpty()) {
+            return page.map(h -> present(h, null, null, null, caller));
+        }
+        // the bed and the two documents of the whole page: one query each, never one per row
+        List<Long> ids = page.getContent().stream().map(Hospitalization::getId).toList();
+        Map<Long, BedAssignment> beds = bedAssignmentRepository.findByHospitalizationIdInAndEndTimeIsNull(ids).stream()
+                .collect(Collectors.toMap(a -> a.getHospitalization().getId(), Function.identity()));
+        Map<Long, AdmissionRecord> admissions = admissionRecordRepository.findByHospitalizationIdIn(ids).stream()
+                .collect(Collectors.toMap(r -> r.getHospitalization().getId(), Function.identity()));
+        Map<Long, DischargeRecord> discharges = dischargeRecordRepository.findByHospitalizationIdIn(ids).stream()
+                .collect(Collectors.toMap(r -> r.getHospitalization().getId(), Function.identity()));
+        return page.map(h -> present(h, beds.get(h.getId()), admissions.get(h.getId()), discharges.get(h.getId()), caller));
     }
 
     @Override
@@ -146,12 +174,16 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         Hospitalization hospitalization = find(id);
         requireAdmitted(hospitalization, "Only ADMITTED hospitalizations can be updated");
         Doctor doctor = findActiveDoctor(request.attendingDoctorId());
-        hospitalizationMapper.updateEntity(request, hospitalization);
-        hospitalization.setAdmissionReason(request.admissionReason().trim());
+        AdmissionRecord admission = admissionRecordOf(id);
+        hospitalizationMapper.updateAdmission(request, admission);
+        admission.setReason(request.admissionReason().trim());
+        admission.setInitialDiagnosisCode(cleanCode(request.initialDiagnosisCode()));
+        admission.setInitialDiagnosis(clean(request.initialDiagnosis()));
         hospitalization.setAttendingDoctor(doctor);
         Hospitalization saved = hospitalizationRepository.saveAndFlush(hospitalization);
+        AdmissionRecord savedAdmission = admissionRecordRepository.saveAndFlush(admission);
         log.info("Updated hospitalization {}", id);
-        return present(saved, currentAssignment(id), caller);
+        return present(saved, currentAssignment(id), savedAdmission, null, caller);
     }
 
     @Override
@@ -176,7 +208,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         String reason = request.reason() == null || request.reason().isBlank() ? null : request.reason().trim();
         BedAssignment next = openAssignment(hospitalization, target, now, reason);
         log.info("Transferred hospitalization {} to bed {}", id, target.getId());
-        return present(hospitalization, next, caller);
+        return present(hospitalization, next, admissionRecordOf(id), null, caller);
     }
 
     @Override
@@ -184,6 +216,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         Hospitalization hospitalization = find(id);
         assertMayDischarge(hospitalization, caller);
         assertTransition(hospitalization, HospitalizationStatus.DISCHARGED);
+        validateDischargeDocument(request);
 
         BedAssignment current = currentAssignment(id);
         Instant now = clock.instant();
@@ -196,10 +229,19 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         }
         hospitalization.setStatus(HospitalizationStatus.DISCHARGED);
         hospitalization.setDischargeTime(dischargeTime);
-        hospitalization.setDischargeNotes(request.dischargeNotes().trim());
         Hospitalization saved = hospitalizationRepository.saveAndFlush(hospitalization);
+        DischargeRecord discharge = dischargeRecordRepository.saveAndFlush(DischargeRecord.builder()
+                .hospitalization(saved)
+                .dischargeType(request.dischargeType())
+                .destinationFacility(clean(request.destinationFacility()))
+                .finalDiagnosisCode(cleanCode(request.finalDiagnosisCode()))
+                .finalDiagnosis(clean(request.finalDiagnosis()))
+                .summary(request.summary().trim())
+                .instructions(clean(request.instructions()))
+                .followUpDate(request.followUpDate())
+                .build());
         log.info("Discharged hospitalization {}", id);
-        return present(saved, null, caller);
+        return present(saved, null, admissionRecordOf(id), discharge, caller);
     }
 
     // ---- lookups -------------------------------------------------------------------------------
@@ -210,6 +252,17 @@ public class HospitalizationServiceImpl implements HospitalizationService {
 
     private BedAssignment currentAssignment(Long hospitalizationId) {
         return bedAssignmentRepository.findByHospitalizationIdAndEndTimeIsNull(hospitalizationId).orElse(null);
+    }
+
+    /** Every hospitalization has one (the database checks it at commit). */
+    private AdmissionRecord admissionRecordOf(Long hospitalizationId) {
+        return admissionRecordRepository.findByHospitalizationId(hospitalizationId).orElseThrow(
+                () -> new IllegalStateException("Hospitalization %d has no admission record".formatted(hospitalizationId)));
+    }
+
+    private DischargeRecord dischargeRecordOf(Hospitalization hospitalization) {
+        return hospitalization.getStatus() == HospitalizationStatus.DISCHARGED
+                ? dischargeRecordRepository.findByHospitalizationId(hospitalization.getId()).orElse(null) : null;
     }
 
     private Patient findActivePatient(Long id) {
@@ -228,12 +281,13 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         return doctor;
     }
 
-    /** The bed, its room and its ward must all be active. */
+    /** The bed, its room, its ward and the ward's clinic must all be active. */
     private Bed findUsableBed(Long id) {
         Bed bed = bedRepository.findById(id).orElseThrow(() -> ResourceNotFoundException.of("Bed", id));
-        if (!bed.isActive() || !bed.getRoom().isActive() || !bed.getRoom().getWard().isActive()) {
-            throw new BusinessRuleException("Bed %d is not in service (the bed, its room or its ward is inactive)"
-                    .formatted(id));
+        if (!bed.isActive() || !bed.getRoom().isActive() || !bed.getRoom().getWard().isActive()
+                || !bed.getRoom().getWard().getClinic().isActive()) {
+            throw new BusinessRuleException(
+                    "Bed %d is not in service (the bed, its room, its ward or its clinic is inactive)".formatted(id));
         }
         return bed;
     }
@@ -252,6 +306,34 @@ public class HospitalizationServiceImpl implements HospitalizationService {
     }
 
     // ---- rules ---------------------------------------------------------------------------------
+
+    /** What the admission record itself requires, independent of other records. */
+    private void validateAdmissionDocument(AdmissionRequest request) {
+        if (request.admissionType() == AdmissionType.TRANSFER_IN && clean(request.referringFacility()) == null) {
+            throw new BusinessRuleException("referringFacility is required for a TRANSFER_IN admission");
+        }
+        if ((request.admissionSource() == AdmissionSource.APPOINTMENT) != (request.appointmentId() != null)) {
+            throw new BusinessRuleException("admissionSource APPOINTMENT and appointmentId go together");
+        }
+    }
+
+    /** What the discharge record itself requires. */
+    private void validateDischargeDocument(DischargeRequest request) {
+        boolean transferOut = request.dischargeType() == DischargeType.TRANSFER_OUT;
+        if (transferOut != (clean(request.destinationFacility()) != null)) {
+            throw new BusinessRuleException(transferOut
+                    ? "destinationFacility is required for a TRANSFER_OUT discharge"
+                    : "destinationFacility is only allowed for a TRANSFER_OUT discharge");
+        }
+        if (request.followUpDate() != null) {
+            if (request.dischargeType() == DischargeType.DECEASED) {
+                throw new BusinessRuleException("A DECEASED discharge has no follow-up date");
+            }
+            if (request.followUpDate().isBefore(LocalDate.ofInstant(clock.instant(), ZoneOffset.UTC))) {
+                throw new BusinessRuleException("followUpDate must not be in the past");
+            }
+        }
+    }
 
     private void assertBedFree(Long bedId, Instant from) {
         if (bedAssignmentRepository.isBedTakenFrom(bedId, from)) {
@@ -309,11 +391,27 @@ public class HospitalizationServiceImpl implements HospitalizationService {
                 .build());
     }
 
-    /** Maps to the API shape: adds the current bed and hides clinical text from callers who may not see it. */
-    private HospitalizationResponse present(Hospitalization hospitalization, BedAssignment current, Caller caller) {
+    /** Blank text is stored as null. */
+    private static String clean(String text) {
+        return text == null || text.isBlank() ? null : text.trim();
+    }
+
+    private static String cleanCode(String code) {
+        String cleaned = clean(code);
+        return cleaned == null ? null : cleaned.toUpperCase(Locale.ROOT);
+    }
+
+    /**
+     * Maps to the API shape: adds the current bed and the two documents and hides clinical text from callers who
+     * may not see it. Every response goes through here so the redaction cannot be forgotten.
+     */
+    private HospitalizationResponse present(Hospitalization hospitalization, BedAssignment current,
+            AdmissionRecord admission, DischargeRecord discharge, Caller caller) {
         BedSummary bed = current == null ? null : bedMapper.toSummary(current.getBed());
-        HospitalizationResponse response = HospitalizationResponse
-                .withCurrentBed(hospitalizationMapper.toResponse(hospitalization), bed);
+        HospitalizationResponse response = HospitalizationResponse.assemble(
+                hospitalizationMapper.toResponse(hospitalization), bed,
+                admission == null ? null : hospitalizationMapper.toAdmissionResponse(admission),
+                discharge == null ? null : hospitalizationMapper.toDischargeResponse(discharge));
         return caller.canSeeClinicalData() ? response : response.withoutClinicalData();
     }
 }
