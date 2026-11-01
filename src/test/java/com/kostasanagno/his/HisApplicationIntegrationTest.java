@@ -757,6 +757,100 @@ class HisApplicationIntegrationTest {
         }
     }
 
+    // ---- audit log -----------------------------------------------------------------------------
+
+    @Test
+    void auditTrailRecordsWhoAccessedWhichPatientAndWhetherItWasAllowed() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "AU000000001");
+        long doctorUser = registerUser(admin, "dr.audit", "DOCTOR");
+        registerUser(admin, "nurse.audit", "NURSE");
+        registerUser(admin, "recep.audit", "RECEPTIONIST");
+        createDoctorLinked(admin, "AU-DOC-1", doctorUser);
+        String doctor = "Bearer " + login("dr.audit", "Sup3rSecret!");
+        String nurse = "Bearer " + login("nurse.audit", "Sup3rSecret!");
+        String receptionist = "Bearer " + login("recep.audit", "Sup3rSecret!");
+
+        // the doctor writes a note about the patient: CREATE of the note, tied to the patient
+        long note = idOf(mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"patientId\":%d,\"assessment\":\"Highly confidential finding\"}".formatted(patient)))
+                .andExpect(status().isCreated()));
+        assertThat(auditCount("username = 'dr.audit' AND action = 'CREATE' AND resource_type = 'CLINICAL_NOTE' "
+                + "AND resource_id = ? AND patient_id = ? AND outcome = 'SUCCESS'", note, patient)).isEqualTo(1);
+
+        // a nurse reads the note, its versions and searches: each disclosed record is logged against the patient
+        mockMvc.perform(get("/api/clinical-notes/" + note).header("Authorization", nurse)).andExpect(status().isOk());
+        mockMvc.perform(get("/api/clinical-notes/" + note + "/versions").header("Authorization", nurse))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/clinical-notes").param("patientId", String.valueOf(patient))
+                        .header("Authorization", nurse)).andExpect(status().isOk());
+        assertThat(auditCount("username = 'nurse.audit' AND action = 'VIEW' AND resource_type = 'CLINICAL_NOTE' "
+                + "AND resource_id = ? AND patient_id = ? AND outcome = 'SUCCESS'", note, patient)).isEqualTo(3);
+
+        // a receptionist is refused access to clinical data - and the attempt is on record, tied to the patient
+        mockMvc.perform(get("/api/clinical-notes/" + note).header("Authorization", receptionist))
+                .andExpect(status().isForbidden());
+        assertThat(auditCount("username = 'recep.audit' AND resource_type = 'CLINICAL_NOTE' AND resource_id = ? "
+                + "AND patient_id = ? AND outcome = 'DENIED' AND roles = 'RECEPTIONIST'", note, patient)).isEqualTo(1);
+        // ... and may not delete a patient (denied), but may look at the patient record itself (allowed)
+        mockMvc.perform(delete("/api/patients/" + patient).header("Authorization", receptionist))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/patients/" + patient).header("Authorization", receptionist))
+                .andExpect(status().isOk());
+        assertThat(auditCount("username = 'recep.audit' AND action = 'DELETE' AND resource_type = 'PATIENT' "
+                + "AND patient_id = ? AND outcome = 'DENIED'", patient)).isEqualTo(1);
+        assertThat(auditCount("username = 'recep.audit' AND action = 'VIEW' AND resource_type = 'PATIENT' "
+                + "AND patient_id = ? AND outcome = 'SUCCESS'", patient)).isEqualTo(1);
+
+        // looking for something that does not exist is recorded too
+        mockMvc.perform(get("/api/patients/987654").header("Authorization", nurse)).andExpect(status().isNotFound());
+        assertThat(auditCount("username = 'nurse.audit' AND resource_type = 'PATIENT' AND resource_id = 987654 "
+                + "AND outcome = 'FAILED'")).isEqualTo(1);
+
+        // only an admin reads the log; "who accessed this patient" is one query
+        mockMvc.perform(get("/api/audit-events").header("Authorization", nurse)).andExpect(status().isForbidden());
+        assertThat(auditCount("username = 'nurse.audit' AND resource_type = 'AUDIT_LOG' AND outcome = 'DENIED'"))
+                .isEqualTo(1);
+        mockMvc.perform(get("/api/audit-events").param("patientId", String.valueOf(patient))
+                        .param("outcome", "DENIED").header("Authorization", admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.content[?(@.username=='recep.audit')]").isNotEmpty());
+        mockMvc.perform(get("/api/audit-events").param("patientId", String.valueOf(patient))
+                        .param("username", "NURSE.audit").param("action", "VIEW").param("resourceType", "CLINICAL_NOTE")
+                        .header("Authorization", admin))
+                .andExpect(jsonPath("$.totalElements").value(3))
+                .andExpect(jsonPath("$.content[0].roles").value("NURSE"))
+                .andExpect(jsonPath("$.content[0].path").exists());
+        assertThat(auditCount("username = 'admin' AND resource_type = 'AUDIT_LOG' AND outcome = 'SUCCESS'"))
+                .isGreaterThanOrEqualTo(2);
+
+        // no clinical text, names or query strings ever reach the audit table
+        mockMvc.perform(get("/api/patients").param("name", "UniqueSearchSecret").header("Authorization", nurse))
+                .andExpect(status().isOk());
+        assertThat(auditCount("path ILIKE '%UniqueSearchSecret%' OR path ILIKE '%confidential%'")).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit_events WHERE username = 'nurse.audit' "
+                + "AND resource_type = 'PATIENT' AND action = 'VIEW' AND resource_id IS NULL", Integer.class))
+                .isEqualTo(1);   // the empty search left a single summary event
+
+        // the log cannot be rewritten or pruned, not even with raw SQL
+        assertThatThrownBy(() -> jdbc.update("UPDATE audit_events SET username = 'someone.else'"))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM audit_events WHERE username = 'dr.audit'"))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO audit_events (occurred_at, username, roles, action, "
+                + "resource_type, outcome, http_method, path) VALUES (now(), 'x', 'ADMIN', 'EXPORT', 'PATIENT', "
+                + "'SUCCESS', 'GET', '/x')")).isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_audit_events_action");
+    }
+
+    private int auditCount(String where, Object... args) {
+        return jdbc.queryForObject("SELECT count(*) FROM audit_events WHERE " + where, Integer.class, args);
+    }
+
+    // ---- helpers for the clinical note tests (and the audit test above) -------------------------
+
     // ---- clinical notes ------------------------------------------------------------------------
 
     @Test
