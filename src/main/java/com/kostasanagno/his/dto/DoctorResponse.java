@@ -8,6 +8,7 @@ public record DoctorResponse(
         String lastName,
         String licenseNumber,
         SpecialtyResponse specialty,
+        ClinicSummary clinic,
         String phone,
         String email,
         Long userId,

@@ -1,7 +1,9 @@
 package com.kostasanagno.his.mapper;
 
+import com.kostasanagno.his.dto.ClinicSummary;
 import com.kostasanagno.his.dto.DoctorRequest;
 import com.kostasanagno.his.dto.DoctorResponse;
+import com.kostasanagno.his.entity.Clinic;
 import com.kostasanagno.his.entity.Doctor;
 import org.mapstruct.Mapper;
 import org.mapstruct.Mapping;
@@ -14,6 +16,7 @@ public interface DoctorMapper {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "specialty", ignore = true)
     @Mapping(target = "user", ignore = true)
+    @Mapping(target = "clinic", ignore = true)
     @Mapping(target = "active", ignore = true)
     @Mapping(target = "deletedAt", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
@@ -23,6 +26,7 @@ public interface DoctorMapper {
     @Mapping(target = "id", ignore = true)
     @Mapping(target = "specialty", ignore = true)
     @Mapping(target = "user", ignore = true)
+    @Mapping(target = "clinic", ignore = true)
     @Mapping(target = "active", ignore = true)
     @Mapping(target = "deletedAt", ignore = true)
     @Mapping(target = "createdAt", ignore = true)
@@ -31,4 +35,6 @@ public interface DoctorMapper {
 
     @Mapping(target = "userId", source = "user.id")
     DoctorResponse toResponse(Doctor doctor);
+
+    ClinicSummary toClinicSummary(Clinic clinic);
 }

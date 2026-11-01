@@ -27,5 +27,6 @@ public interface RoomMapper {
 
     @Mapping(target = "wardId", source = "ward.id")
     @Mapping(target = "wardName", source = "ward.name")
+    @Mapping(target = "clinicName", source = "ward.clinic.name")
     RoomResponse toResponse(Room room);
 }

@@ -14,14 +14,14 @@ public interface BedAssignmentRepository extends JpaRepository<BedAssignment, Lo
 
     String BED_GRAPH = "bed";
 
-    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward"})
+    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward", "bed.room.ward.clinic"})
     Optional<BedAssignment> findByHospitalizationIdAndEndTimeIsNull(Long hospitalizationId);
 
-    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward"})
+    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward", "bed.room.ward.clinic"})
     List<BedAssignment> findByHospitalizationIdInAndEndTimeIsNull(Collection<Long> hospitalizationIds);
 
     /** Whole movement history of one hospitalization, oldest first. */
-    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward"})
+    @EntityGraph(attributePaths = {"bed", "bed.room", "bed.room.ward", "bed.room.ward.clinic"})
     List<BedAssignment> findByHospitalizationIdOrderByStartTimeAsc(Long hospitalizationId);
 
     /** Is the bed taken at any moment from {@code from} onwards (an open assignment or one ending after it)? */
@@ -38,4 +38,6 @@ public interface BedAssignmentRepository extends JpaRepository<BedAssignment, Lo
     boolean existsByBedRoomIdAndEndTimeIsNull(Long roomId);
 
     boolean existsByBedRoomWardIdAndEndTimeIsNull(Long wardId);
+
+    boolean existsByBedRoomWardClinicIdAndEndTimeIsNull(Long clinicId);
 }

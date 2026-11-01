@@ -33,10 +33,13 @@ public interface BedMapper {
     @Mapping(target = "roomNumber", source = "bed.room.roomNumber")
     @Mapping(target = "wardId", source = "bed.room.ward.id")
     @Mapping(target = "wardName", source = "bed.room.ward.name")
+    @Mapping(target = "clinicId", source = "bed.room.ward.clinic.id")
+    @Mapping(target = "clinicName", source = "bed.room.ward.clinic.name")
     @Mapping(target = "occupied", source = "occupied")
     BedResponse toResponse(Bed bed, boolean occupied);
 
     @Mapping(target = "roomNumber", source = "room.roomNumber")
     @Mapping(target = "wardName", source = "room.ward.name")
+    @Mapping(target = "clinicName", source = "room.ward.clinic.name")
     BedSummary toSummary(Bed bed);
 }

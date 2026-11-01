@@ -12,11 +12,11 @@ import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 public interface RoomRepository extends JpaRepository<Room, Long>, JpaSpecificationExecutor<Room> {
 
     @Override
-    @EntityGraph(attributePaths = "ward")
+    @EntityGraph(attributePaths = {"ward", "ward.clinic"})
     Optional<Room> findById(Long id);
 
     @Override
-    @EntityGraph(attributePaths = "ward")
+    @EntityGraph(attributePaths = {"ward", "ward.clinic"})
     Page<Room> findAll(Specification<Room> spec, Pageable pageable);
 
     boolean existsByWardIdAndRoomNumberIgnoreCase(Long wardId, String roomNumber);

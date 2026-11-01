@@ -7,6 +7,8 @@ public record BedResponse(
         String roomNumber,
         Long wardId,
         String wardName,
+        Long clinicId,
+        String clinicName,
         boolean active,
         boolean occupied) {
 }

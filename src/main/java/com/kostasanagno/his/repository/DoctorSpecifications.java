@@ -39,6 +39,9 @@ public final class DoctorSpecifications {
                 if (criteria.specialtyId() != null) {
                     predicates.add(cb.equal(root.get("specialty").get("id"), criteria.specialtyId()));
                 }
+                if (criteria.clinicId() != null) {
+                    predicates.add(cb.equal(root.get("clinic").get("id"), criteria.clinicId()));
+                }
             }
             return cb.and(predicates.toArray(Predicate[]::new));
         };

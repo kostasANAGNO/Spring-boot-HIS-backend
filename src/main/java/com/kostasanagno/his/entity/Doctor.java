@@ -50,6 +50,11 @@ public class Doctor extends BaseEntity {
     @JoinColumn(name = "user_id", unique = true)
     private User user;
 
+    /** The clinic this doctor belongs to (optional). */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "clinic_id")
+    private Clinic clinic;
+
     @Builder.Default
     @Column(nullable = false)
     private boolean active = true;

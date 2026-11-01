@@ -33,7 +33,7 @@ public final class HospitalizationSpecifications {
                 if (criteria.admittedTo() != null) {
                     predicates.add(cb.lessThanOrEqualTo(root.<Instant>get("admissionTime"), criteria.admittedTo()));
                 }
-                if (criteria.bedId() != null || criteria.wardId() != null) {
+                if (criteria.bedId() != null || criteria.wardId() != null || criteria.clinicId() != null) {
                     predicates.add(cb.exists(lastBedMatches(criteria, root, query, cb)));
                 }
             }
@@ -61,6 +61,10 @@ public final class HospitalizationSpecifications {
         }
         if (criteria.wardId() != null) {
             conditions.add(cb.equal(assignment.get("bed").get("room").get("ward").get("id"), criteria.wardId()));
+        }
+        if (criteria.clinicId() != null) {
+            conditions.add(cb.equal(
+                    assignment.get("bed").get("room").get("ward").get("clinic").get("id"), criteria.clinicId()));
         }
         return match.select(assignment.get("id")).where(conditions.toArray(Predicate[]::new));
     }

@@ -70,6 +70,31 @@ INSERT INTO specialties (name) VALUES
     ('Obstetrics and Gynecology'),
     ('Dermatology');
 
+-- ---------------------------------------------------------------------------------------------
+-- Organisation: clinics (departments) contain wards (wings); wards contain rooms; rooms contain beds.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE clinics (
+    id           BIGSERIAL PRIMARY KEY,
+    name         VARCHAR(100) NOT NULL,
+    specialty_id BIGINT REFERENCES specialties (id),
+    active       BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ  NOT NULL,
+    updated_at   TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT uq_clinics_name UNIQUE (name)
+);
+
+CREATE INDEX idx_clinics_specialty ON clinics (specialty_id);
+
+-- Starter clinics (add more through the API). Each is linked to the matching specialty when there is one.
+INSERT INTO clinics (name, specialty_id, created_at, updated_at) VALUES
+    ('Cardiology', (SELECT id FROM specialties WHERE name = 'Cardiology'), now(), now()),
+    ('Internal Medicine', (SELECT id FROM specialties WHERE name = 'General Medicine'), now(), now()),
+    ('Surgery', (SELECT id FROM specialties WHERE name = 'Surgery'), now(), now()),
+    ('Orthopedics', (SELECT id FROM specialties WHERE name = 'Orthopedics'), now(), now()),
+    ('Pediatrics', (SELECT id FROM specialties WHERE name = 'Pediatrics'), now(), now()),
+    ('Intensive Care', NULL, now(), now()),
+    ('Maternity', (SELECT id FROM specialties WHERE name = 'Obstetrics and Gynecology'), now(), now());
+
 CREATE TABLE doctors (
     id             BIGSERIAL PRIMARY KEY,
     first_name     VARCHAR(100) NOT NULL,
@@ -79,6 +104,7 @@ CREATE TABLE doctors (
     phone          VARCHAR(30),
     email          VARCHAR(255),
     user_id        BIGINT REFERENCES users (id),
+    clinic_id      BIGINT REFERENCES clinics (id),
     active         BOOLEAN      NOT NULL DEFAULT TRUE,
     deleted_at     TIMESTAMPTZ,
     created_at     TIMESTAMPTZ  NOT NULL,
@@ -89,6 +115,7 @@ CREATE TABLE doctors (
 
 CREATE INDEX idx_doctors_last_name ON doctors (lower(last_name));
 CREATE INDEX idx_doctors_specialty_id ON doctors (specialty_id);
+CREATE INDEX idx_doctors_clinic_id ON doctors (clinic_id);
 
 CREATE TABLE appointments (
     id                  BIGSERIAL PRIMARY KEY,
@@ -118,25 +145,21 @@ CREATE INDEX idx_appointments_patient_start ON appointments (patient_id, start_t
 CREATE INDEX idx_appointments_status ON appointments (status);
 
 -- ---------------------------------------------------------------------------------------------
--- Hospital structure: wards -> rooms -> beds (deactivated, never deleted)
+-- Hospital structure: clinic -> ward (wing) -> room -> bed (deactivated, never deleted)
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE wards (
     id         BIGSERIAL PRIMARY KEY,
+    clinic_id  BIGINT       NOT NULL REFERENCES clinics (id),
     name       VARCHAR(100) NOT NULL,
     active     BOOLEAN      NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ  NOT NULL,
     updated_at TIMESTAMPTZ  NOT NULL,
-    CONSTRAINT uq_wards_name UNIQUE (name)
+    CONSTRAINT uq_wards_clinic_name UNIQUE (clinic_id, name)
 );
 
-INSERT INTO wards (name, created_at, updated_at) VALUES
-    ('Cardiology', now(), now()),
-    ('Internal Medicine', now(), now()),
-    ('Surgery', now(), now()),
-    ('Orthopedics', now(), now()),
-    ('Pediatrics', now(), now()),
-    ('Intensive Care', now(), now()),
-    ('Maternity', now(), now());
+-- One starter ward ("Main Wing") per clinic; add more wards, rooms and beds through the API.
+INSERT INTO wards (clinic_id, name, created_at, updated_at)
+SELECT id, 'Main Wing', now(), now() FROM clinics;
 
 CREATE TABLE rooms (
     id          BIGSERIAL PRIMARY KEY,

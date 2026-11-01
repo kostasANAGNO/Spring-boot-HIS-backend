@@ -13,14 +13,14 @@ public interface DoctorRepository extends JpaRepository<Doctor, Long>, JpaSpecif
 
     /** Fetches the specialty in the same query (no N+1 on the search endpoint). */
     @Override
-    @EntityGraph(attributePaths = "specialty")
+    @EntityGraph(attributePaths = {"specialty", "clinic"})
     Page<Doctor> findAll(Specification<Doctor> spec, Pageable pageable);
 
     /** Soft-deleted doctors are never returned by these lookups. */
-    @EntityGraph(attributePaths = "specialty")
+    @EntityGraph(attributePaths = {"specialty", "clinic"})
     Optional<Doctor> findByIdAndActiveTrue(Long id);
 
-    @EntityGraph(attributePaths = "specialty")
+    @EntityGraph(attributePaths = {"specialty", "clinic"})
     Optional<Doctor> findByUserUsernameIgnoreCaseAndActiveTrue(String username);
 
     /** The checks below look at all rows, soft-deleted included, because these values stay unique in the table. */

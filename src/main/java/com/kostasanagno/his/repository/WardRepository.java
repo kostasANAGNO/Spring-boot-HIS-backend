@@ -2,13 +2,25 @@ package com.kostasanagno.his.repository;
 
 import com.kostasanagno.his.entity.Ward;
 import java.util.List;
+import java.util.Optional;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
+import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
 
-public interface WardRepository extends JpaRepository<Ward, Long> {
+public interface WardRepository extends JpaRepository<Ward, Long>, JpaSpecificationExecutor<Ward> {
 
-    List<Ward> findAllByActiveOrderByNameAsc(boolean active);
+    @Override
+    @EntityGraph(attributePaths = "clinic")
+    Optional<Ward> findById(Long id);
 
-    boolean existsByNameIgnoreCase(String name);
+    @Override
+    @EntityGraph(attributePaths = "clinic")
+    List<Ward> findAll(Specification<Ward> spec, Sort sort);
 
-    boolean existsByNameIgnoreCaseAndIdNot(String name, Long id);
+    /** Ward names are unique inside a clinic. */
+    boolean existsByClinicIdAndNameIgnoreCase(Long clinicId, String name);
+
+    boolean existsByClinicIdAndNameIgnoreCaseAndIdNot(Long clinicId, String name, Long id);
 }

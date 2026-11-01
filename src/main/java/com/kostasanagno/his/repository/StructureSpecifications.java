@@ -2,9 +2,11 @@ package com.kostasanagno.his.repository;
 
 import com.kostasanagno.his.dto.BedSearchCriteria;
 import com.kostasanagno.his.dto.RoomSearchCriteria;
+import com.kostasanagno.his.dto.WardSearchCriteria;
 import com.kostasanagno.his.entity.Bed;
 import com.kostasanagno.his.entity.BedAssignment;
 import com.kostasanagno.his.entity.Room;
+import com.kostasanagno.his.entity.Ward;
 import jakarta.persistence.criteria.Predicate;
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +18,19 @@ public final class StructureSpecifications {
     private StructureSpecifications() {
     }
 
-    /** Rooms of the ward (optional); active ones unless {@code active=false} is requested. */
+    /** Wards of a clinic (optional); active ones unless {@code active=false} is requested. */
+    public static Specification<Ward> wards(WardSearchCriteria criteria) {
+        return (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.equal(root.get("active"), isActive(criteria == null ? null : criteria.active())));
+            if (criteria != null && criteria.clinicId() != null) {
+                predicates.add(cb.equal(root.get("clinic").get("id"), criteria.clinicId()));
+            }
+            return cb.and(predicates.toArray(Predicate[]::new));
+        };
+    }
+
+    /** Rooms of the ward or clinic (optional); active ones unless {@code active=false} is requested. */
     public static Specification<Room> rooms(RoomSearchCriteria criteria) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
@@ -24,11 +38,14 @@ public final class StructureSpecifications {
             if (criteria != null && criteria.wardId() != null) {
                 predicates.add(cb.equal(root.get("ward").get("id"), criteria.wardId()));
             }
+            if (criteria != null && criteria.clinicId() != null) {
+                predicates.add(cb.equal(root.get("ward").get("clinic").get("id"), criteria.clinicId()));
+            }
             return cb.and(predicates.toArray(Predicate[]::new));
         };
     }
 
-    /** Beds filtered by ward/room/availability; active ones unless {@code active=false} is requested. */
+    /** Beds filtered by clinic/ward/room/availability; active ones unless {@code active=false} is requested. */
     public static Specification<Bed> beds(BedSearchCriteria criteria) {
         return (root, query, cb) -> {
             List<Predicate> predicates = new ArrayList<>();
@@ -39,6 +56,9 @@ public final class StructureSpecifications {
                 }
                 if (criteria.wardId() != null) {
                     predicates.add(cb.equal(root.get("room").get("ward").get("id"), criteria.wardId()));
+                }
+                if (criteria.clinicId() != null) {
+                    predicates.add(cb.equal(root.get("room").get("ward").get("clinic").get("id"), criteria.clinicId()));
                 }
                 if (criteria.available() != null) {
                     var open = query.subquery(Long.class);

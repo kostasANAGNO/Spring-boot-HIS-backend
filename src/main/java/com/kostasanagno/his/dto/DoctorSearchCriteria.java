@@ -8,5 +8,6 @@ public record DoctorSearchCriteria(
         String name,
         String licenseNumber,
         Long specialtyId,
+        Long clinicId,
         Boolean active) {
 }
