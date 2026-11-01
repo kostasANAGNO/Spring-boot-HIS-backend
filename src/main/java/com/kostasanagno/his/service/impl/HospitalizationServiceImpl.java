@@ -35,6 +35,7 @@ import com.kostasanagno.his.repository.HospitalizationRepository;
 import com.kostasanagno.his.repository.HospitalizationSpecifications;
 import com.kostasanagno.his.repository.PatientRepository;
 import com.kostasanagno.his.security.Caller;
+import com.kostasanagno.his.service.HospitalizationDischargedEvent;
 import com.kostasanagno.his.service.HospitalizationService;
 import java.time.Clock;
 import java.time.Instant;
@@ -47,6 +48,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.security.access.AccessDeniedException;
@@ -77,6 +79,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
     private final AppointmentRepository appointmentRepository;
     private final HospitalizationMapper hospitalizationMapper;
     private final BedMapper bedMapper;
+    private final ApplicationEventPublisher eventPublisher;
     private final Clock clock;
 
     @Override
@@ -240,6 +243,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
                 .instructions(clean(request.instructions()))
                 .followUpDate(request.followUpDate())
                 .build());
+        eventPublisher.publishEvent(new HospitalizationDischargedEvent(id));
         log.info("Discharged hospitalization {}", id);
         return present(saved, null, admissionRecordOf(id), discharge, caller);
     }

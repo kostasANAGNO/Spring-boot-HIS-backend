@@ -70,6 +70,9 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         if (cause.contains("ck_invoices_paid_range")) {
             return build(HttpStatus.CONFLICT, "The payment would exceed the amount due", request);
         }
+        if (cause.contains("medication order") || cause.contains("medication_orders")) {
+            return build(HttpStatus.CONFLICT, "The medication order changed in the meantime; reload it and try again", request);
+        }
         if (cause.contains("uq_hospitalizations_appointment")) {
             return build(HttpStatus.CONFLICT, "The appointment is already linked to a hospitalization", request);
         }
