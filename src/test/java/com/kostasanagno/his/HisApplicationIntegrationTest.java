@@ -970,6 +970,256 @@ class HisApplicationIntegrationTest {
         mockMvc.perform(delete("/api/clinics/" + clinic).header("Authorization", admin)).andExpect(status().is4xxClientError());
     }
 
+    // ---- medication ----------------------------------------------------------------------------
+
+    /** A ward bed, an admitted patient and the staff who handle medication for them. */
+    private record MedicationFixture(String admin, String doctor, String nurse, String pharmacist, String receptionist,
+            long patient, long stay, long doctorProfile, long bed) {
+    }
+
+    private MedicationFixture medicationFixture(String tag, String clinicName) throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long doctorUser = registerUser(admin, "dr." + tag, "DOCTOR");
+        registerUser(admin, "nurse." + tag, "NURSE");
+        registerUser(admin, "pharma." + tag, "PHARMACIST");
+        registerUser(admin, "recep." + tag, "RECEPTIONIST");
+        long doctorProfile = createDoctorLinked(admin, "MED-" + tag.toUpperCase(), doctorUser);
+        long room = createRoom(admin, wardId(clinicName), "MED-" + tag.toUpperCase());
+        long bed = createBed(admin, room, "1");
+        long patient = createPatient(admin, "MD" + String.format("%09d", Math.abs(tag.hashCode()) % 1_000_000_000));
+        long stay = idOf(admit(admin, patient, doctorProfile, bed).andExpect(status().isCreated()));
+        return new MedicationFixture(admin, "Bearer " + login("dr." + tag, "Sup3rSecret!"),
+                "Bearer " + login("nurse." + tag, "Sup3rSecret!"), "Bearer " + login("pharma." + tag, "Sup3rSecret!"),
+                "Bearer " + login("recep." + tag, "Sup3rSecret!"), patient, stay, doctorProfile, bed);
+    }
+
+    private long medicationId(String code) {
+        return jdbc.queryForObject("SELECT id FROM medications WHERE code = ?", Long.class, code);
+    }
+
+    private ResultActions orderMedication(String auth, long stay, String code, String schedule, Integer interval)
+            throws Exception {
+        String body = """
+                {"hospitalizationId":%d,"medicationId":%d,"doseAmount":500,"doseUnit":"mg","route":"ORAL",
+                 "scheduleType":"%s"%s,"instructions":"With food"}""".formatted(stay, medicationId(code), schedule,
+                interval == null ? "" : ",\"intervalHours\":" + interval);
+        return mockMvc.perform(post("/api/medication-orders").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
+    private ResultActions orderAction(String auth, long order, String action, String json) throws Exception {
+        return mockMvc.perform(post("/api/medication-orders/" + order + "/" + action).header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(json));
+    }
+
+    @Test
+    void medicationFlowOrderDispenseAdministerWithRolesAndSafetyRules() throws Exception {
+        MedicationFixture f = medicationFixture("flow", "Cardiology");
+
+        // the catalog: seeded, readable by those who handle medication, maintained by the pharmacy
+        mockMvc.perform(get("/api/medications").param("text", "morph").header("Authorization", f.nurse()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].controlled").value(true));
+        String newDrug = "{\"code\":\"cefazolin-1g\",\"name\":\"Cefazolin\",\"form\":\"INJECTION\",\"strength\":\"1 g\"}";
+        mockMvc.perform(post("/api/medications").header("Authorization", f.nurse()).contentType(MediaType.APPLICATION_JSON)
+                .content(newDrug)).andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/medications").header("Authorization", f.pharmacist()).contentType(MediaType.APPLICATION_JSON)
+                        .content(newDrug))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.code").value("CEFAZOLIN-1G"));
+        mockMvc.perform(get("/api/medications").header("Authorization", f.receptionist())).andExpect(status().isForbidden());
+
+        // only a doctor orders; the order starts PENDING and shows where the patient is
+        orderMedication(f.nurse(), f.stay(), "PARACETAMOL-500", "SCHEDULED", 8).andExpect(status().isForbidden());
+        orderMedication(f.doctor(), f.stay(), "PARACETAMOL-500", "SCHEDULED", null).andExpect(status().isBadRequest());
+        long order = idOf(orderMedication(f.doctor(), f.stay(), "PARACETAMOL-500", "SCHEDULED", 8)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.patient.id").value(f.patient()))
+                .andExpect(jsonPath("$.currentBed.clinicName").value("Cardiology"))
+                .andExpect(jsonPath("$.prescribedBy.id").value(f.doctorProfile())));
+
+        // the pharmacy's queue, and nothing can be given before the pharmacy dispenses
+        mockMvc.perform(get("/api/medication-orders").param("status", "PENDING").param("hospitalizationId", String.valueOf(f.stay()))
+                        .header("Authorization", f.pharmacist()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].patient.fullName").exists())
+                .andExpect(jsonPath("$.content[0].currentBed.bedNumber").value("1"));
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isBadRequest());
+        orderAction(f.nurse(), order, "dispense", "{\"quantity\":30}").andExpect(status().isForbidden());
+        orderAction(f.pharmacist(), order, "dispense", "{\"quantity\":30,\"notes\":\"One pack\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("DISPENSED"));
+        orderAction(f.pharmacist(), order, "dispense", "{\"quantity\":10}").andExpect(status().isOk());   // a second supply
+        mockMvc.perform(get("/api/medication-orders/" + order + "/dispensings").header("Authorization", f.nurse()))
+                .andExpect(jsonPath("$.length()").value(2)).andExpect(jsonPath("$[0].dispensedBy").value("pharma.flow"));
+
+        // the bedside: a dose, then the safety rules (double dose, overdose, future, wrong role)
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\",\"notes\":\"Tolerated well\"}")
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.outcome").value("GIVEN"))
+                .andExpect(jsonPath("$.doseAmount").value(500.0))
+                .andExpect(jsonPath("$.administeredBy").value("nurse.flow"))
+                .andExpect(jsonPath("$.patientId").value(f.patient()));
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\"}")
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.message").value(org.hamcrest.Matchers.containsString("not due")));
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\",\"doseAmount\":501}")
+                .andExpect(status().isBadRequest());
+        orderAction(f.nurse(), order, "administrations",
+                "{\"outcome\":\"HELD\",\"administeredAt\":\"2999-01-01T00:00:00Z\"}").andExpect(status().isBadRequest());
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"REFUSED\",\"notes\":\"Patient refused\"}")
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.doseAmount").doesNotExist());
+        orderAction(f.admin(), order, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isForbidden());
+        orderAction(f.pharmacist(), order, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isForbidden());
+
+        // the administration record, per order and per patient stay
+        mockMvc.perform(get("/api/medication-orders/" + order + "/administrations").header("Authorization", f.doctor()))
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].outcome").value("GIVEN")).andExpect(jsonPath("$[1].outcome").value("REFUSED"));
+        mockMvc.perform(get("/api/medication-administrations").param("hospitalizationId", String.valueOf(f.stay()))
+                        .param("outcome", "GIVEN").header("Authorization", f.pharmacist()))
+                .andExpect(jsonPath("$.totalElements").value(1));
+
+        // a one-off order is completed by its dose and then closed for good
+        long once = idOf(orderMedication(f.doctor(), f.stay(), "IBUPROFEN-400", "ONCE", null).andExpect(status().isCreated()));
+        orderAction(f.pharmacist(), once, "dispense", "{\"quantity\":1}").andExpect(status().isOk());
+        orderAction(f.doctor(), once, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isCreated());
+        mockMvc.perform(get("/api/medication-orders/" + once).header("Authorization", f.nurse()))
+                .andExpect(jsonPath("$.status").value("COMPLETED")).andExpect(jsonPath("$.closedAt").exists());
+        orderAction(f.nurse(), once, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isBadRequest());
+
+        // stopping ends the therapy; a stopped order accepts nothing
+        orderAction(f.nurse(), order, "stop", "{\"reason\":\"x\"}").andExpect(status().isForbidden());
+        orderAction(f.doctor(), order, "stop", "{\"reason\":\"Course finished\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("STOPPED"))
+                .andExpect(jsonPath("$.closedReason").value("Course finished"));
+        orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isBadRequest());
+        orderAction(f.pharmacist(), order, "dispense", "{\"quantity\":1}").andExpect(status().isBadRequest());
+        orderAction(f.doctor(), order, "stop", "{\"reason\":\"again\"}").andExpect(status().isBadRequest());
+
+        // controlled medication: dispensed by a pharmacist only, rejection and cancellation need a pending order
+        long controlled = idOf(orderMedication(f.doctor(), f.stay(), "MORPHINE-10", "AS_NEEDED", 6).andExpect(status().isCreated()));
+        orderAction(f.admin(), controlled, "dispense", "{\"quantity\":1}").andExpect(status().isForbidden());
+        orderAction(f.pharmacist(), controlled, "dispense", "{\"quantity\":1}").andExpect(status().isOk());
+        long rejected = idOf(orderMedication(f.doctor(), f.stay(), "HEPARIN-5000", "SCHEDULED", 12).andExpect(status().isCreated()));
+        orderAction(f.pharmacist(), rejected, "reject", "{\"reason\":\"Interacts with the current therapy\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("REJECTED"));
+        orderAction(f.doctor(), rejected, "cancel", "{\"reason\":\"x\"}").andExpect(status().isBadRequest());
+        long cancelled = idOf(orderMedication(f.doctor(), f.stay(), "OMEPRAZOLE-20", "SCHEDULED", 24).andExpect(status().isCreated()));
+        orderAction(f.doctor(), cancelled, "cancel", "{\"reason\":\"Wrong patient\"}")
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CANCELLED"));
+
+        // receptionists see nothing; pharmacists see medication but not the rest of the hospital
+        mockMvc.perform(get("/api/medication-orders").header("Authorization", f.receptionist())).andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/medication-orders/" + order).header("Authorization", f.receptionist())).andExpect(status().isForbidden());
+        for (String path : List.of("/api/patients", "/api/hospitalizations/" + f.stay(), "/api/invoices", "/api/clinical-notes",
+                "/api/appointments")) {
+            mockMvc.perform(get(path).header("Authorization", f.pharmacist())).andExpect(status().isForbidden());
+        }
+
+        // doctors see their own orders
+        mockMvc.perform(get("/api/medication-orders/me").header("Authorization", f.doctor()))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(5));
+        mockMvc.perform(get("/api/medication-orders/me").header("Authorization", f.nurse())).andExpect(status().isForbidden());
+
+        // everything is in the audit trail, tied to the patient (names and doses are not)
+        assertThat(auditCount("username = 'dr.flow' AND resource_type = 'MEDICATION_ORDER' AND action = 'CREATE' "
+                + "AND patient_id = ? AND outcome = 'SUCCESS'", f.patient())).isEqualTo(5);
+        assertThat(auditCount("username = 'nurse.flow' AND resource_type = 'MEDICATION_ORDER' AND action = 'ADMINISTER' "
+                + "AND resource_id = ? AND patient_id = ? AND outcome = 'SUCCESS'", order, f.patient())).isEqualTo(2);
+        assertThat(auditCount("username = 'pharma.flow' AND resource_type = 'MEDICATION_ORDER' AND action = 'DISPENSE' "
+                + "AND patient_id = ? AND outcome = 'SUCCESS'", f.patient())).isEqualTo(4);
+        assertThat(auditCount("username = 'nurse.flow' AND resource_type = 'MEDICATION_ORDER' AND action = 'CREATE' "
+                + "AND outcome = 'DENIED'")).isEqualTo(1);
+        assertThat(auditCount("username = 'recep.flow' AND resource_type = 'MEDICATION_ORDER' AND outcome = 'DENIED'"))
+                .isGreaterThanOrEqualTo(2);
+    }
+
+    @Test
+    void openOrdersAreClosedWhenThePatientIsDischargedAndTheDatabaseGuardsMedicationRecords() throws Exception {
+        MedicationFixture f = medicationFixture("leave", "Surgery");
+        long pending = idOf(orderMedication(f.doctor(), f.stay(), "PARACETAMOL-500", "SCHEDULED", 8).andExpect(status().isCreated()));
+        long running = idOf(orderMedication(f.doctor(), f.stay(), "AMOXICILLIN-500", "SCHEDULED", 8).andExpect(status().isCreated()));
+        orderAction(f.pharmacist(), running, "dispense", "{\"quantity\":21}").andExpect(status().isOk());
+        orderAction(f.nurse(), running, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isCreated());
+
+        // the database refuses to rewrite or remove medication records
+        assertThatThrownBy(() -> jdbc.update("UPDATE medication_orders SET dose_amount = 5000 WHERE id = ?", running))
+                .hasMessageContaining("cannot be edited");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM medication_orders WHERE id = ?", running))
+                .hasMessageContaining("not allowed");
+        assertThatThrownBy(() -> jdbc.update("UPDATE medication_administrations SET notes = 'x' WHERE order_id = ?", running))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM medication_administrations WHERE order_id = ?", running))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("UPDATE medication_dispensings SET quantity = 1 WHERE order_id = ?", running))
+                .hasMessageContaining("append-only");
+        // a status can only move forward along the allowed path
+        assertThatThrownBy(() -> jdbc.update("UPDATE medication_orders SET status = 'COMPLETED', closed_at = now() WHERE id = ?", pending))
+                .hasMessageContaining("cannot go from");
+        // nothing is administered unless dispensed, a dose needs a dose amount
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO medication_administrations (order_id, outcome, administered_at, "
+                + "dose_amount, administered_by_user_id, created_at) VALUES (?, 'GIVEN', now(), 500, ?, now())",
+                pending, userId("nurse.leave"))).hasMessageContaining("DISPENSED");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO medication_administrations (order_id, outcome, administered_at, "
+                + "administered_by_user_id, created_at) VALUES (?, 'GIVEN', now(), ?, now())", running, userId("nurse.leave")))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_medication_administrations_dose");
+        assertThatThrownBy(() -> jdbc.update("UPDATE medication_orders SET interval_hours = 4 WHERE id = ?", pending))
+                .hasMessageContaining("cannot be edited");
+
+        // discharge closes what is still open: a pending order is cancelled, a running one is stopped
+        mockMvc.perform(post("/api/hospitalizations/" + f.stay() + "/discharge").header("Authorization", f.admin())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeType\":\"HOME\",\"summary\":\"Recovered\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/medication-orders/" + pending).header("Authorization", f.doctor()))
+                .andExpect(jsonPath("$.status").value("CANCELLED"))
+                .andExpect(jsonPath("$.closedReason").value("The patient was discharged"))
+                .andExpect(jsonPath("$.currentBed").doesNotExist());
+        mockMvc.perform(get("/api/medication-orders/" + running).header("Authorization", f.doctor()))
+                .andExpect(jsonPath("$.status").value("STOPPED"))
+                .andExpect(jsonPath("$.closedReason").value("The patient was discharged"));
+        assertThat(jdbc.queryForObject("SELECT closed_by_user_id FROM medication_orders WHERE id = ?", Long.class, running)).isNull();
+        // and nothing more can be ordered, dispensed or given for a patient who left
+        orderMedication(f.doctor(), f.stay(), "PARACETAMOL-500", "ONCE", null).andExpect(status().isBadRequest());
+        orderAction(f.nurse(), running, "administrations", "{\"outcome\":\"GIVEN\"}").andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void concurrentDosesOfTheSameOrderAreRecordedOnlyOnce() throws Exception {
+        MedicationFixture f = medicationFixture("dosage", "Orthopedics");
+        long order = idOf(orderMedication(f.doctor(), f.stay(), "PARACETAMOL-500", "SCHEDULED", 8).andExpect(status().isCreated()));
+        orderAction(f.pharmacist(), order, "dispense", "{\"quantity\":21}").andExpect(status().isOk());
+
+        int requests = 6;   // six nurses press "given" at the same moment
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                Callable<Integer> dose = () -> {
+                    ready.countDown();
+                    go.await();
+                    return orderAction(f.nurse(), order, "administrations", "{\"outcome\":\"GIVEN\"}")
+                            .andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(dose));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 201).hasSize(1);
+            assertThat(statuses).filteredOn(code -> code == 400).hasSize(requests - 1);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM medication_administrations WHERE order_id = ? "
+                + "AND outcome = 'GIVEN'", Integer.class, order)).isEqualTo(1);
+    }
+
     // ---- billing -------------------------------------------------------------------------------
 
     @Test

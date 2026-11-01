@@ -47,6 +47,7 @@ import com.kostasanagno.his.repository.DoctorRepository;
 import com.kostasanagno.his.repository.HospitalizationRepository;
 import com.kostasanagno.his.repository.PatientRepository;
 import com.kostasanagno.his.security.Caller;
+import com.kostasanagno.his.service.HospitalizationDischargedEvent;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -61,6 +62,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
@@ -91,6 +93,8 @@ class HospitalizationServiceImplTest {
     private BedRepository bedRepository;
     @Mock
     private AppointmentRepository appointmentRepository;
+    @Mock
+    private ApplicationEventPublisher eventPublisher;
 
     private HospitalizationServiceImpl service;
     private Patient patient;
@@ -111,7 +115,7 @@ class HospitalizationServiceImplTest {
         ReflectionTestUtils.setField(hospitalizationMapper, "bedMapper", bedMapper);
         service = new HospitalizationServiceImpl(hospitalizationRepository, admissionRecordRepository,
                 dischargeRecordRepository, bedAssignmentRepository, patientRepository, doctorRepository, bedRepository,
-                appointmentRepository, hospitalizationMapper, bedMapper, Clock.fixed(NOW, ZoneOffset.UTC));
+                appointmentRepository, hospitalizationMapper, bedMapper, eventPublisher, Clock.fixed(NOW, ZoneOffset.UTC));
 
         Specialty cardiology = Specialty.builder().name("Cardiology").build();
         cardiology.setId(1L);
@@ -508,6 +512,7 @@ class HospitalizationServiceImplTest {
         assertThat(record.instructions()).isEqualTo("Rest");
         assertThat(response.admission().reason()).isEqualTo("Chest pain");        // the admission record travels with it
         verify(dischargeRecordRepository).saveAndFlush(any(DischargeRecord.class));
+        verify(eventPublisher).publishEvent(new HospitalizationDischargedEvent(40L));   // other modules close their open work
     }
 
     @Test
@@ -571,6 +576,7 @@ class HospitalizationServiceImplTest {
         assertThat(h.getStatus()).isEqualTo(HospitalizationStatus.ADMITTED);
         verify(bedAssignmentRepository, never()).saveAndFlush(any());
         verify(dischargeRecordRepository, never()).saveAndFlush(any());
+        verify(eventPublisher, never()).publishEvent(any(Object.class));
     }
 
     @Test
