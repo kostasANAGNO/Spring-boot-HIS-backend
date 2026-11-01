@@ -39,6 +39,7 @@ public class AuditServiceImpl implements AuditService {
                         .resourceId(target.resourceId())
                         .patientId(target.patientId())
                         .outcome(entry.outcome())
+                        .detail(entry.detail())
                         .httpMethod(entry.httpMethod())
                         .path(entry.path())
                         .ipAddress(entry.ipAddress())

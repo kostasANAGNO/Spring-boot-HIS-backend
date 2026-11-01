@@ -15,6 +15,7 @@ public record AuditEventResponse(
         Long resourceId,
         Long patientId,
         AuditOutcome outcome,
+        String detail,
         String httpMethod,
         String path,
         String ipAddress) {

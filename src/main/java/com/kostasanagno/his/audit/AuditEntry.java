@@ -12,6 +12,7 @@ public record AuditEntry(
         AuditAction action,
         AuditResource resource,
         AuditOutcome outcome,
+        String detail,
         String httpMethod,
         String path,
         String ipAddress,

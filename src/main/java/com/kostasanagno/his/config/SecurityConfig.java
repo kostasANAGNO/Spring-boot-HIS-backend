@@ -8,6 +8,7 @@ import java.util.Arrays;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -17,6 +18,8 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.authorization.AuthorizationEventPublisher;
+import org.springframework.security.authorization.SpringAuthorizationEventPublisher;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -62,6 +65,15 @@ public class SecurityConfig {
                 .addFilterBefore(new JwtAuthenticationFilter(jwtService, userDetailsService),
                         UsernamePasswordAuthenticationFilter.class)
                 .build();
+    }
+
+    /**
+     * Makes Spring Security publish an event whenever the URL rules refuse a request, so refusals that never reach
+     * a controller (such as a non-admin calling {@code /api/auth/register}) can still be audited.
+     */
+    @Bean
+    AuthorizationEventPublisher authorizationEventPublisher(ApplicationEventPublisher publisher) {
+        return new SpringAuthorizationEventPublisher(publisher);
     }
 
     @Bean

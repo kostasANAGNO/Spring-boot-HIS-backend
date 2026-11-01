@@ -87,7 +87,7 @@ public class AuditAspect {
         Caller caller = Caller.from(authentication);
         String roles = caller.roles().stream().map(Enum::name).sorted().collect(Collectors.joining(","));
         HttpServletRequest request = currentRequest();
-        auditService.record(new AuditEntry(caller.username(), roles, audited.action(), audited.resource(), outcome,
+        auditService.record(new AuditEntry(caller.username(), roles, audited.action(), audited.resource(), outcome, null,
                 request == null ? "N/A" : request.getMethod(),
                 request == null ? "N/A" : abbreviate(request.getRequestURI()),
                 request == null ? null : request.getRemoteAddr(), targets));

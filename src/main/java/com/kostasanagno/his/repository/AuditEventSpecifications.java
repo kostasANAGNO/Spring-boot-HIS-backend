@@ -37,6 +37,9 @@ public final class AuditEventSpecifications {
                 if (criteria.outcome() != null) {
                     predicates.add(cb.equal(root.get("outcome"), criteria.outcome()));
                 }
+                if (StringUtils.hasText(criteria.ipAddress())) {
+                    predicates.add(cb.equal(root.get("ipAddress"), criteria.ipAddress().trim()));
+                }
                 if (criteria.from() != null) {
                     predicates.add(cb.greaterThanOrEqualTo(root.<Instant>get("occurredAt"), criteria.from()));
                 }

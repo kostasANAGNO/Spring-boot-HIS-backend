@@ -272,6 +272,8 @@ CREATE TRIGGER trg_clinical_notes_no_delete
 -- ---------------------------------------------------------------------------------------------
 -- Audit log: who accessed or changed which patient-related record, when, and whether it was allowed.
 -- Append-only. Holds ids and metadata only, never names, notes or any clinical text.
+-- Logins are recorded too (action LOGIN, resource USER); a failed login for a name that is not an account is stored
+-- as username 'unknown', so a password typed into the username field never lands in this table.
 -- ---------------------------------------------------------------------------------------------
 CREATE TABLE audit_events (
     id            BIGSERIAL PRIMARY KEY,
@@ -283,13 +285,14 @@ CREATE TABLE audit_events (
     resource_id   BIGINT,
     patient_id    BIGINT,
     outcome       VARCHAR(10)  NOT NULL,
+    detail        VARCHAR(40),
     http_method   VARCHAR(10)  NOT NULL,
     path          VARCHAR(255) NOT NULL,
     ip_address    VARCHAR(45),
     CONSTRAINT ck_audit_events_action CHECK (action IN ('VIEW', 'CREATE', 'UPDATE', 'DELETE', 'CANCEL', 'COMPLETE',
-        'NO_SHOW', 'ADMIT', 'TRANSFER', 'DISCHARGE', 'AMEND', 'ISSUE', 'PAY')),
+        'NO_SHOW', 'ADMIT', 'TRANSFER', 'DISCHARGE', 'AMEND', 'ISSUE', 'PAY', 'LOGIN')),
     CONSTRAINT ck_audit_events_resource_type CHECK (resource_type IN ('PATIENT', 'APPOINTMENT', 'HOSPITALIZATION',
-        'CLINICAL_NOTE', 'INVOICE', 'AUDIT_LOG')),
+        'CLINICAL_NOTE', 'INVOICE', 'USER', 'AUDIT_LOG')),
     CONSTRAINT ck_audit_events_outcome CHECK (outcome IN ('SUCCESS', 'DENIED', 'FAILED'))
 );
 

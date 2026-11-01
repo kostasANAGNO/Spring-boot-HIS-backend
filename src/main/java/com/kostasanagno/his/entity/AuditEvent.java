@@ -59,6 +59,10 @@ public class AuditEvent extends IdentifiedEntity {
     @Column(nullable = false, length = 10, updatable = false)
     private AuditOutcome outcome;
 
+    /** Short machine code for why, e.g. {@code BAD_CREDENTIALS}; never free text. */
+    @Column(length = 40, updatable = false)
+    private String detail;
+
     @Column(name = "http_method", nullable = false, length = 10, updatable = false)
     private String httpMethod;
 

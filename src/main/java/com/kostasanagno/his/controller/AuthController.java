@@ -1,9 +1,12 @@
 package com.kostasanagno.his.controller;
 
+import com.kostasanagno.his.audit.Audited;
 import com.kostasanagno.his.dto.LoginRequest;
 import com.kostasanagno.his.dto.LoginResponse;
 import com.kostasanagno.his.dto.RegisterRequest;
 import com.kostasanagno.his.dto.UserResponse;
+import com.kostasanagno.his.entity.AuditAction;
+import com.kostasanagno.his.entity.AuditResource;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.service.AuthService;
 import com.kostasanagno.his.service.UserService;
@@ -31,7 +34,7 @@ public class AuthController {
 
     @PostMapping("/login")
     @SecurityRequirements
-    @Operation(summary = "Exchange credentials for a JWT access token")
+    @Operation(summary = "Exchange credentials for a JWT access token (audited by AuthenticationAuditListener)")
     public LoginResponse login(@Valid @RequestBody LoginRequest request) {
         return authService.login(request);
     }
@@ -39,6 +42,7 @@ public class AuthController {
     @PostMapping("/register")
     @ResponseStatus(HttpStatus.CREATED)
     @PreAuthorize(AccessRules.ADMIN_ONLY)
+    @Audited(resource = AuditResource.USER, action = AuditAction.CREATE)
     @Operation(summary = "Create a user (ADMIN only)")
     public UserResponse register(@Valid @RequestBody RegisterRequest request) {
         return userService.register(request);
