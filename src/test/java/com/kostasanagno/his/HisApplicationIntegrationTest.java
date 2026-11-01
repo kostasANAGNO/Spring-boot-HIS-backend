@@ -757,6 +757,205 @@ class HisApplicationIntegrationTest {
         }
     }
 
+    // ---- clinical notes ------------------------------------------------------------------------
+
+    @Test
+    void clinicalNotesAreVersionedAccessControlledAndImmutable() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "CN000000001");
+        long otherPatient = createPatient(admin, "CN000000002");
+        long authorUser = registerUser(admin, "dr.notes", "DOCTOR");
+        long otherUser = registerUser(admin, "dr.notes.other", "DOCTOR");
+        registerUser(admin, "nurse.notes", "NURSE");
+        registerUser(admin, "recep.notes", "RECEPTIONIST");
+        long authorDoctor = createDoctorLinked(admin, "CN-DOC-1", authorUser);
+        createDoctorLinked(admin, "CN-DOC-2", otherUser);
+        String doctor = "Bearer " + login("dr.notes", "Sup3rSecret!");
+        String otherDoctor = "Bearer " + login("dr.notes.other", "Sup3rSecret!");
+        String nurse = "Bearer " + login("nurse.notes", "Sup3rSecret!");
+        String receptionist = "Bearer " + login("recep.notes", "Sup3rSecret!");
+
+        // only a doctor writes; the author is the doctor profile of the caller
+        String note = "{\"patientId\":%d,\"history\":\"Chest pain\",\"assessment\":\"Suspected angina\",\"diagnosisCode\":\"i20.9\"}"
+                .formatted(patient);
+        long id = idOf(mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON).content(note))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.version").value(1))
+                .andExpect(jsonPath("$.diagnosisCode").value("I20.9"))
+                .andExpect(jsonPath("$.authorDoctor.id").value(authorDoctor))
+                .andExpect(jsonPath("$.editedBy").value("dr.notes")));
+        for (String token : List.of(admin, nurse, receptionist)) {
+            mockMvc.perform(post("/api/clinical-notes").header("Authorization", token)
+                    .contentType(MediaType.APPLICATION_JSON).content(note)).andExpect(status().isForbidden());
+        }
+
+        // nurses read, receptionists never see clinical records
+        mockMvc.perform(get("/api/clinical-notes/" + id).header("Authorization", nurse))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.assessment").value("Suspected angina"));
+        mockMvc.perform(get("/api/clinical-notes/" + id).header("Authorization", receptionist))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/clinical-notes").header("Authorization", receptionist))
+                .andExpect(status().isForbidden());
+
+        // amendments: the author adds version 2, a stale base version is a conflict, others are refused
+        amendNote(doctor, id, 1, "Corrected diagnosis", "Confirmed angina", "I20.0")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(2))
+                .andExpect(jsonPath("$.assessment").value("Confirmed angina"))
+                .andExpect(jsonPath("$.lastChangeReason").value("Corrected diagnosis"));
+        amendNote(doctor, id, 1, "Stale", "Whatever", "I20.0").andExpect(status().isConflict());
+        amendNote(otherDoctor, id, 2, "Not mine", "Hijack", "I20.0").andExpect(status().isForbidden());
+        amendNote(nurse, id, 2, "Nurse", "Nope", "I20.0").andExpect(status().isForbidden());
+        amendNote(admin, id, 2, "Admin review", "Confirmed angina, stable", "I20.0")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.version").value(3))
+                .andExpect(jsonPath("$.editedBy").value("admin"))
+                .andExpect(jsonPath("$.authorDoctor.id").value(authorDoctor));
+
+        // the whole history is kept, oldest first
+        mockMvc.perform(get("/api/clinical-notes/" + id + "/versions").header("Authorization", nurse))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(3))
+                .andExpect(jsonPath("$[0].assessment").value("Suspected angina"))
+                .andExpect(jsonPath("$[0].diagnosisCode").value("I20.9"))
+                .andExpect(jsonPath("$[0].changeReason").doesNotExist())
+                .andExpect(jsonPath("$[1].assessment").value("Confirmed angina"))
+                .andExpect(jsonPath("$[2].changeReason").value("Admin review"))
+                .andExpect(jsonPath("$[2].editedBy").value("admin"));
+
+        // search sees the CURRENT version: diagnosis prefix, patient filter, /me
+        mockMvc.perform(get("/api/clinical-notes").param("patientId", String.valueOf(patient))
+                        .param("diagnosisCode", "i20.0").header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].version").value(3));
+        mockMvc.perform(get("/api/clinical-notes").param("diagnosisCode", "I20.9").header("Authorization", nurse))
+                .andExpect(jsonPath("$.content[?(@.id==" + id + ")]").isEmpty());
+        mockMvc.perform(get("/api/clinical-notes").param("patientId", String.valueOf(otherPatient))
+                        .header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(0));
+        mockMvc.perform(get("/api/clinical-notes/me").header("Authorization", doctor))
+                .andExpect(jsonPath("$.totalElements").value(1));
+        mockMvc.perform(get("/api/clinical-notes/me").header("Authorization", otherDoctor))
+                .andExpect(jsonPath("$.totalElements").value(0));
+        mockMvc.perform(delete("/api/clinical-notes/" + id).header("Authorization", admin))
+                .andExpect(status().is4xxClientError());
+
+        // validation: content required, bad ICD-10 code, patient must exist
+        mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"patientId\":" + patient + "}"))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"patientId\":999999,\"assessment\":\"x\"}"))
+                .andExpect(status().isNotFound());
+
+        // the database itself refuses to rewrite or remove medical history
+        assertThatThrownBy(() -> jdbc.update("UPDATE clinical_note_versions SET assessment = 'tampered' WHERE note_id = ?", id))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM clinical_note_versions WHERE note_id = ?", id))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM clinical_notes WHERE id = ?", id))
+                .hasMessageContaining("append-only");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM clinical_note_versions WHERE note_id = ?",
+                Integer.class, id)).isEqualTo(3);
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO clinical_note_versions (note_id, version_number, "
+                + "edited_by_user_id, created_at) VALUES (?, 4, ?, now())", id, userId("admin")))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("ck_clinical_note_versions_has_content");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO clinical_note_versions (note_id, version_number, assessment, "
+                + "edited_by_user_id, created_at) VALUES (?, 3, 'dup', ?, now())", id, userId("admin")))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasMessageContaining("uq_clinical_note_versions_note_version");
+    }
+
+    @Test
+    void clinicalNoteLinksMustBelongToTheSamePatient() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patientA = createPatient(admin, "CN000000010");
+        long patientB = createPatient(admin, "CN000000011");
+        long doctorUser = registerUser(admin, "dr.links", "DOCTOR");
+        long doctorId = createDoctorLinked(admin, "CN-DOC-3", doctorUser);
+        String doctor = "Bearer " + login("dr.links", "Sup3rSecret!");
+        Instant start = futureHour(23);
+        long appointmentOfA = bookOk(admin, patientA, doctorId, start, start.plus(30, ChronoUnit.MINUTES));
+
+        String forB = "{\"patientId\":%d,\"appointmentId\":%d,\"assessment\":\"x\"}".formatted(patientB, appointmentOfA);
+        mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON).content(forB))
+                .andExpect(status().isBadRequest());
+        String forA = "{\"patientId\":%d,\"appointmentId\":%d,\"assessment\":\"Routine checkup\"}"
+                .formatted(patientA, appointmentOfA);
+        mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON).content(forA))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.appointmentId").value(appointmentOfA));
+        mockMvc.perform(get("/api/clinical-notes").param("appointmentId", String.valueOf(appointmentOfA))
+                        .header("Authorization", doctor))
+                .andExpect(jsonPath("$.totalElements").value(1));
+        // writing a note does not touch the appointment
+        mockMvc.perform(get("/api/appointments/" + appointmentOfA).header("Authorization", admin))
+                .andExpect(jsonPath("$.status").value("SCHEDULED"));
+        // both links at once are refused
+        mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"patientId\":%d,\"appointmentId\":%d,\"hospitalizationId\":1,\"assessment\":\"x\"}"
+                                .formatted(patientA, appointmentOfA)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void concurrentAmendmentsOfTheSameVersionYieldExactlyOneSuccess() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "CN000000020");
+        long doctorUser = registerUser(admin, "dr.race", "DOCTOR");
+        createDoctorLinked(admin, "CN-DOC-4", doctorUser);
+        String doctor = "Bearer " + login("dr.race", "Sup3rSecret!");
+        long id = idOf(mockMvc.perform(post("/api/clinical-notes").header("Authorization", doctor)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"patientId\":%d,\"assessment\":\"Initial\"}".formatted(patient)))
+                .andExpect(status().isCreated()));
+
+        int requests = 6;
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                int n = i;
+                Callable<Integer> amendment = () -> {
+                    ready.countDown();
+                    go.await();
+                    return amendNote(doctor, id, 1, "Edit " + n, "Assessment " + n, "I10")
+                            .andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(amendment));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 200).hasSize(1);
+            assertThat(statuses).filteredOn(code -> code == 409).hasSize(requests - 1);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM clinical_note_versions WHERE note_id = ?",
+                Integer.class, id)).isEqualTo(2);
+    }
+
+    private ResultActions amendNote(String auth, long id, int baseVersion, String reason, String assessment,
+            String code) throws Exception {
+        String body = """
+                {"baseVersion":%d,"changeReason":"%s","assessment":"%s","diagnosisCode":"%s"}"""
+                .formatted(baseVersion, reason, assessment, code);
+        return mockMvc.perform(put("/api/clinical-notes/" + id).header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON).content(body));
+    }
+
     // ---- helpers for the hospitalization tests -------------------------------------------------
 
     private long wardId(String name) {
