@@ -197,8 +197,23 @@ Receptionists get **403** on every clinical-notes endpoint.
   wards `clinicId`; rooms `clinicId`, `wardId`; beds `clinicId`, `wardId`, `roomId`, `available` (true = nobody in it),
   `active` (default: active only); doctors `clinicId`; hospitalizations `clinicId` (current bed, or last bed once
   discharged). Bed and room responses show the ward and clinic names.
-* **Flow:** `POST /api/hospitalizations` (admit, creates the stay and its first bed assignment) ->
-  `POST .../transfer` (optional, any number of times) -> `POST .../discharge`. Status: `ADMITTED -> DISCHARGED`
+* **Two documents:** a stay has an **admission record** (the "eisitirio", written when the patient is admitted) and,
+  once the patient has left, a **discharge record** (the "exitirio", written with the discharge). They are their own
+  tables, exactly one each per stay, and both appear nested in every hospitalization response (`admission`, and
+  `discharge` once discharged).
+  * *Admission record:* `admissionType` (`ELECTIVE`, `EMERGENCY`, `TRANSFER_IN`), `admissionSource` (`APPOINTMENT`,
+    `EMERGENCY_DEPARTMENT`, `REFERRAL`, `OTHER`), `referringFacility` (required for `TRANSFER_IN`), `reason` (request field
+    `admissionReason`), optional `initialDiagnosisCode` (ICD-10) and `initialDiagnosis`. The source is `APPOINTMENT`
+    exactly when an `appointmentId` is given. While the patient is admitted, `PUT /api/hospitalizations/{id}` corrects the
+    reason and initial diagnosis (and the attending doctor); type, source and facility stay as written. After the
+    discharge the admission record is frozen.
+  * *Discharge record:* `dischargeType` (`HOME`, `TRANSFER_OUT`, `AGAINST_MEDICAL_ADVICE`, `DECEASED`),
+    `destinationFacility` (required for `TRANSFER_OUT`, not allowed otherwise), optional `finalDiagnosisCode` /
+    `finalDiagnosis`, required `summary`, optional `instructions` and `followUpDate` (not in the past, not for
+    `DECEASED`). It is final: the database refuses any change.
+  * The database also guarantees every stay has its admission record and every discharged stay its discharge record.
+* **Flow:** `POST /api/hospitalizations` (admit, creates the stay, the admission record and the first bed assignment) ->
+  `POST .../transfer` (optional, any number of times) -> `POST .../discharge` (writes the discharge record). Status: `ADMITTED -> DISCHARGED`
   (final). `admissionTime` / `dischargeTime` default to now and must not be in the future. Only `ADMITTED` stays can be
   updated or transferred. Hospitalizations and bed assignments are never deleted; `GET .../{id}/bed-history` lists
   every bed the patient occupied, oldest first.
@@ -209,13 +224,14 @@ Receptionists get **403** on every clinical-notes endpoint.
   instant. The patient, doctor, bed, room and ward must exist (404) and be active (400).
 * **Appointment link (optional):** `appointmentId` must belong to the same patient and can be linked to only one stay;
   the appointment's status is never changed automatically.
-* **Privacy:** `diagnosis`, `dischargeNotes` and the transfer `reason` are returned as `null` to users whose roles are
-  only RECEPTIONIST. Clinical text is never logged.
+* **Privacy:** for users whose roles are only RECEPTIONIST the clinical parts are returned as `null`: the initial and final
+  diagnosis (text and code), the discharge `summary` and `instructions`, and the transfer `reason`. The administrative parts
+  (types, source, facilities, reason for admission, follow-up date) stay visible. Clinical text is never logged.
 * Search filters: `patientId`, `doctorId`, `wardId`, `bedId` (the current bed, or the last bed once discharged),
   `status`, `admittedFrom`, `admittedTo`. Default sort is `admissionTime` descending.
 
-> **After pulling this change** reset the local DB (`V1` gained the clinics, wards, rooms, beds, hospitalizations and
-> bed_assignments tables): `docker compose down -v && docker compose up -d --wait`
+> **After pulling this change** reset the local DB (`V1` gained the clinics, wards, rooms, beds, hospitalizations,
+> admission/discharge records and bed_assignments tables): `docker compose down -v && docker compose up -d --wait`
 
 ### Appointments
 

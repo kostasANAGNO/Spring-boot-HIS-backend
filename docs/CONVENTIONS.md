@@ -137,6 +137,23 @@ or `*Impl` classes; use `@Slf4j` for logging.
 * Store ids and metadata only. Never names, free text, query strings or search terms, and `audit_events` has no
   foreign keys so it outlives any data change. The table is append-only (trigger) and read only by ADMIN.
 
+## Documents of a life cycle (admission and discharge records)
+
+* When a process has formal paperwork at the start and at the end, the paperwork is its own table, **1-1** with the
+  process (`UNIQUE (parent_id)`), and the parent row keeps only the life cycle (status, times). Here:
+  `hospitalizations` + `admission_records` + `discharge_records`. Responses nest the documents (`admission`,
+  `discharge`); the `discharge` stays null until it exists.
+* Each document is written in the SAME transaction as the step that creates it (admit / discharge), validated by its own
+  rules in the service (types that require a facility, source/link pairs, follow-up dates) and by CHECKs in `V1`.
+* Protect them in the database: a deferred constraint trigger (`check_hospitalization_documents`) makes a stay without
+  its admission record, or a discharged stay without its discharge record, impossible at commit; a final document is
+  append-only (`forbid_row_change()`); one that may be corrected while the process runs is guarded by a trigger that
+  freezes it once the process ends. Tests that insert such parents with raw SQL must insert the document in the same
+  statement (see `insertHospitalization` in the integration test).
+* Lists load the documents of a whole page with one `findBy...In(ids)` query each (never per row), and every response
+  goes through the service's single `present(...)` method so redaction cannot be skipped. The clinical parts (diagnoses,
+  summary, instructions) are hidden from receptionists; types, facilities and dates stay visible.
+
 ## Hiding clinical data by role
 
 * The controller builds a `Caller` (username + roles) from the `Authentication` and passes it to services that return
