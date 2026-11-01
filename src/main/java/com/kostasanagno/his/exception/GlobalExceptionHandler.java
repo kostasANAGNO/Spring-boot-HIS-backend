@@ -60,6 +60,10 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
         if (cause.contains("uq_hospitalizations_patient_admitted")) {
             return build(HttpStatus.CONFLICT, "The patient already has an active hospitalization", request);
         }
+        if (cause.contains("uq_clinical_note_versions_note_version")) {
+            return build(HttpStatus.CONFLICT,
+                    "The note was changed by someone else; reload it and try again", request);
+        }
         if (cause.contains("uq_hospitalizations_appointment")) {
             return build(HttpStatus.CONFLICT, "The appointment is already linked to a hospitalization", request);
         }
