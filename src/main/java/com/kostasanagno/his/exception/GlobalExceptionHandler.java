@@ -64,6 +64,12 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
             return build(HttpStatus.CONFLICT,
                     "The note was changed by someone else; reload it and try again", request);
         }
+        if (cause.contains("uq_invoices_active_hospitalization") || cause.contains("uq_invoices_active_appointment")) {
+            return build(HttpStatus.CONFLICT, "This visit or hospitalization already has an invoice", request);
+        }
+        if (cause.contains("ck_invoices_paid_range")) {
+            return build(HttpStatus.CONFLICT, "The payment would exceed the amount due", request);
+        }
         if (cause.contains("uq_hospitalizations_appointment")) {
             return build(HttpStatus.CONFLICT, "The appointment is already linked to a hospitalization", request);
         }
