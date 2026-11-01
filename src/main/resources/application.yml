@@ -33,6 +33,8 @@ app:
   appointments:
     min-duration: ${APPOINTMENT_MIN_DURATION:5m}
     max-duration: ${APPOINTMENT_MAX_DURATION:8h}
+  billing:
+    bed-day-code: ${BILLING_BED_DAY_CODE:BED-DAY}
   cors:
     allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:3000,http://localhost:4200}
 

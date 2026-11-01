@@ -25,6 +25,7 @@ public class PatientIdResolver {
             case APPOINTMENT -> "select a.patient.id from Appointment a where a.id = :id";
             case HOSPITALIZATION -> "select h.patient.id from Hospitalization h where h.id = :id";
             case CLINICAL_NOTE -> "select n.patient.id from ClinicalNote n where n.id = :id";
+            case INVOICE -> "select i.patient.id from Invoice i where i.id = :id";
             case AUDIT_LOG -> "";
         };
         if (resource == AuditResource.PATIENT) {
