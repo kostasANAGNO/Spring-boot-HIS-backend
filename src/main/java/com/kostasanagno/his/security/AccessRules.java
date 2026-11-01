@@ -10,6 +10,12 @@ public final class AccessRules {
     public static final String ADMIN_OR_DOCTOR = "hasAnyRole('ADMIN','DOCTOR')";
     public static final String CLINICAL_STAFF = "hasAnyRole('ADMIN','DOCTOR','NURSE')";
     public static final String BILLING_STAFF = "hasAnyRole('ADMIN','RECEPTIONIST')";
+    /** Everyone who may see medication data: pharmacists see orders but no diagnoses (they are not "clinical" callers). */
+    public static final String MEDICATION_STAFF = "hasAnyRole('ADMIN','DOCTOR','NURSE','PHARMACIST')";
+    /** Maintains the medication catalog and dispenses. */
+    public static final String PHARMACY_STAFF = "hasAnyRole('ADMIN','PHARMACIST')";
+    /** Records administrations at the bedside. */
+    public static final String ADMINISTER_MEDICATION = "hasAnyRole('DOCTOR','NURSE')";
     public static final String ANY_STAFF = "hasAnyRole('ADMIN','DOCTOR','NURSE','RECEPTIONIST')";
 
     private AccessRules() {

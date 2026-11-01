@@ -30,7 +30,7 @@ CREATE TABLE user_roles (
     user_id BIGINT      NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     role    VARCHAR(30) NOT NULL,
     PRIMARY KEY (user_id, role),
-    CONSTRAINT ck_user_roles_role CHECK (role IN ('ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST'))
+    CONSTRAINT ck_user_roles_role CHECK (role IN ('ADMIN', 'DOCTOR', 'NURSE', 'RECEPTIONIST', 'PHARMACIST'))
 );
 
 CREATE TABLE patients (
@@ -396,9 +396,10 @@ CREATE TABLE audit_events (
     path          VARCHAR(255) NOT NULL,
     ip_address    VARCHAR(45),
     CONSTRAINT ck_audit_events_action CHECK (action IN ('VIEW', 'CREATE', 'UPDATE', 'DELETE', 'CANCEL', 'COMPLETE',
-        'NO_SHOW', 'ADMIT', 'TRANSFER', 'DISCHARGE', 'AMEND', 'ISSUE', 'PAY', 'LOGIN')),
+        'NO_SHOW', 'ADMIT', 'TRANSFER', 'DISCHARGE', 'AMEND', 'ISSUE', 'PAY', 'LOGIN', 'DISPENSE', 'REJECT', 'ADMINISTER',
+        'STOP')),
     CONSTRAINT ck_audit_events_resource_type CHECK (resource_type IN ('PATIENT', 'APPOINTMENT', 'HOSPITALIZATION',
-        'CLINICAL_NOTE', 'INVOICE', 'USER', 'AUDIT_LOG')),
+        'CLINICAL_NOTE', 'INVOICE', 'MEDICATION_ORDER', 'USER', 'AUDIT_LOG')),
     CONSTRAINT ck_audit_events_outcome CHECK (outcome IN ('SUCCESS', 'DENIED', 'FAILED'))
 );
 
@@ -560,3 +561,163 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER trg_invoices_guard_issued
     BEFORE UPDATE ON invoices
     FOR EACH ROW EXECUTE FUNCTION guard_issued_invoice();
+
+-- ---------------------------------------------------------------------------------------------
+-- Medication, for hospitalized patients only: the doctor writes an ORDER, the pharmacy DISPENSES (or rejects) it, and
+-- a nurse records every ADMINISTRATION (GIVEN / REFUSED / HELD). Orders are never edited (stop and write a new one);
+-- dispensings and administrations are append-only. There is no stock keeping.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE medications (
+    id         BIGSERIAL PRIMARY KEY,
+    code       VARCHAR(30)  NOT NULL,
+    name       VARCHAR(150) NOT NULL,
+    form       VARCHAR(20)  NOT NULL,
+    strength   VARCHAR(50),
+    atc_code   VARCHAR(10),
+    controlled BOOLEAN      NOT NULL DEFAULT FALSE,
+    active     BOOLEAN      NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ  NOT NULL,
+    updated_at TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT uq_medications_code UNIQUE (code),
+    CONSTRAINT ck_medications_form CHECK (form IN ('TABLET', 'CAPSULE', 'INJECTION', 'INFUSION', 'SYRUP', 'OINTMENT', 'INHALER', 'OTHER'))
+);
+
+-- Starter catalog (verify before real use; maintain it through the API). Controlled substances can only be
+-- dispensed by a pharmacist.
+INSERT INTO medications (code, name, form, strength, atc_code, controlled, created_at, updated_at) VALUES
+    ('PARACETAMOL-500', 'Paracetamol', 'TABLET', '500 mg', 'N02BE01', FALSE, now(), now()),
+    ('IBUPROFEN-400', 'Ibuprofen', 'TABLET', '400 mg', 'M01AE01', FALSE, now(), now()),
+    ('AMOXICILLIN-500', 'Amoxicillin', 'CAPSULE', '500 mg', 'J01CA04', FALSE, now(), now()),
+    ('OMEPRAZOLE-20', 'Omeprazole', 'CAPSULE', '20 mg', 'A02BC01', FALSE, now(), now()),
+    ('INSULIN-RAPID', 'Insulin (rapid acting)', 'INJECTION', '100 IU/ml', 'A10AB', FALSE, now(), now()),
+    ('HEPARIN-5000', 'Heparin', 'INJECTION', '5000 IU/ml', 'B01AB01', FALSE, now(), now()),
+    ('NACL-09-500', 'Sodium chloride 0.9%', 'INFUSION', '500 ml', 'B05BB01', FALSE, now(), now()),
+    ('MORPHINE-10', 'Morphine', 'INJECTION', '10 mg/ml', 'N02AA01', TRUE, now(), now());
+
+CREATE TABLE medication_orders (
+    id                    BIGSERIAL PRIMARY KEY,
+    hospitalization_id    BIGINT         NOT NULL REFERENCES hospitalizations (id),
+    medication_id         BIGINT         NOT NULL REFERENCES medications (id),
+    prescribed_by_doctor_id BIGINT       NOT NULL REFERENCES doctors (id),
+    dose_amount           NUMERIC(10, 3) NOT NULL,
+    dose_unit             VARCHAR(20)    NOT NULL,
+    route                 VARCHAR(20)    NOT NULL,
+    schedule_type         VARCHAR(20)    NOT NULL,
+    interval_hours        INTEGER,
+    start_time            TIMESTAMPTZ    NOT NULL,
+    end_time              TIMESTAMPTZ,
+    instructions          VARCHAR(1000),
+    status                VARCHAR(20)    NOT NULL,
+    closed_reason         VARCHAR(500),
+    closed_at             TIMESTAMPTZ,
+    closed_by_user_id     BIGINT REFERENCES users (id),
+    created_at            TIMESTAMPTZ    NOT NULL,
+    updated_at            TIMESTAMPTZ    NOT NULL,
+    CONSTRAINT ck_medication_orders_dose CHECK (dose_amount > 0),
+    CONSTRAINT ck_medication_orders_route CHECK (route IN ('ORAL', 'INTRAVENOUS', 'INTRAMUSCULAR', 'SUBCUTANEOUS', 'TOPICAL', 'INHALATION', 'OTHER')),
+    CONSTRAINT ck_medication_orders_schedule_type CHECK (schedule_type IN ('ONCE', 'SCHEDULED', 'AS_NEEDED')),
+    -- ONCE has no interval; SCHEDULED is every N hours; AS_NEEDED needs a minimum spacing of N hours
+    CONSTRAINT ck_medication_orders_interval CHECK ((schedule_type = 'ONCE') = (interval_hours IS NULL)),
+    CONSTRAINT ck_medication_orders_interval_range CHECK (interval_hours IS NULL OR interval_hours BETWEEN 1 AND 24),
+    CONSTRAINT ck_medication_orders_period CHECK (end_time IS NULL OR end_time > start_time),
+    CONSTRAINT ck_medication_orders_status CHECK (status IN ('PENDING', 'DISPENSED', 'REJECTED', 'CANCELLED', 'STOPPED', 'COMPLETED')),
+    CONSTRAINT ck_medication_orders_closed_at CHECK ((status IN ('REJECTED', 'CANCELLED', 'STOPPED', 'COMPLETED')) = (closed_at IS NOT NULL)),
+    CONSTRAINT ck_medication_orders_closed_reason CHECK ((status IN ('REJECTED', 'CANCELLED', 'STOPPED')) = (closed_reason IS NOT NULL))
+);
+
+CREATE INDEX idx_medication_orders_hospitalization ON medication_orders (hospitalization_id);
+CREATE INDEX idx_medication_orders_status ON medication_orders (status, created_at);
+CREATE INDEX idx_medication_orders_medication ON medication_orders (medication_id);
+CREATE INDEX idx_medication_orders_prescriber ON medication_orders (prescribed_by_doctor_id);
+
+CREATE TABLE medication_dispensings (
+    id                   BIGSERIAL PRIMARY KEY,
+    order_id             BIGINT       NOT NULL REFERENCES medication_orders (id),
+    quantity             INTEGER      NOT NULL,
+    dispensed_by_user_id BIGINT       NOT NULL REFERENCES users (id),
+    dispensed_at         TIMESTAMPTZ  NOT NULL,
+    notes                VARCHAR(500),
+    created_at           TIMESTAMPTZ  NOT NULL,
+    CONSTRAINT ck_medication_dispensings_quantity CHECK (quantity > 0)
+);
+
+CREATE INDEX idx_medication_dispensings_order ON medication_dispensings (order_id, dispensed_at);
+
+CREATE TABLE medication_administrations (
+    id                      BIGSERIAL PRIMARY KEY,
+    order_id                BIGINT         NOT NULL REFERENCES medication_orders (id),
+    outcome                 VARCHAR(10)    NOT NULL,
+    administered_at         TIMESTAMPTZ    NOT NULL,
+    dose_amount             NUMERIC(10, 3),
+    notes                   VARCHAR(1000),
+    administered_by_user_id BIGINT         NOT NULL REFERENCES users (id),
+    created_at              TIMESTAMPTZ    NOT NULL,
+    CONSTRAINT ck_medication_administrations_outcome CHECK (outcome IN ('GIVEN', 'REFUSED', 'HELD')),
+    -- a dose is recorded exactly when something was given
+    CONSTRAINT ck_medication_administrations_dose CHECK ((outcome = 'GIVEN') = (dose_amount IS NOT NULL AND dose_amount > 0))
+);
+
+CREATE INDEX idx_medication_administrations_order ON medication_administrations (order_id, administered_at);
+CREATE INDEX idx_medication_administrations_time ON medication_administrations (administered_at);
+
+CREATE TRIGGER trg_medication_dispensings_append_only
+    BEFORE UPDATE OR DELETE ON medication_dispensings
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+CREATE TRIGGER trg_medication_administrations_append_only
+    BEFORE UPDATE OR DELETE ON medication_administrations
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+CREATE TRIGGER trg_medication_orders_no_delete
+    BEFORE DELETE ON medication_orders
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+-- An order is never edited (stop it and write a new one); only its status moves, and only forward.
+CREATE FUNCTION guard_medication_order() RETURNS trigger AS $$
+BEGIN
+    IF OLD.hospitalization_id <> NEW.hospitalization_id OR OLD.medication_id <> NEW.medication_id
+            OR OLD.prescribed_by_doctor_id <> NEW.prescribed_by_doctor_id OR OLD.dose_amount <> NEW.dose_amount
+            OR OLD.dose_unit <> NEW.dose_unit OR OLD.route <> NEW.route OR OLD.schedule_type <> NEW.schedule_type
+            OR OLD.interval_hours IS DISTINCT FROM NEW.interval_hours OR OLD.start_time <> NEW.start_time
+            OR OLD.end_time IS DISTINCT FROM NEW.end_time THEN
+        RAISE EXCEPTION 'a medication order cannot be edited; stop it and write a new one';
+    END IF;
+    IF NOT (NEW.status = OLD.status
+            OR (OLD.status = 'PENDING' AND NEW.status IN ('DISPENSED', 'REJECTED', 'CANCELLED'))
+            OR (OLD.status = 'DISPENSED' AND NEW.status IN ('COMPLETED', 'STOPPED'))) THEN
+        RAISE EXCEPTION 'a medication order cannot go from % to %', OLD.status, NEW.status;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_medication_orders_guard
+    BEFORE UPDATE ON medication_orders
+    FOR EACH ROW EXECUTE FUNCTION guard_medication_order();
+
+-- Nothing can be dispensed on a closed order, and nothing administered unless the pharmacy dispensed it.
+CREATE FUNCTION guard_medication_dispensing() RETURNS trigger AS $$
+BEGIN
+    IF (SELECT status FROM medication_orders WHERE id = NEW.order_id) NOT IN ('PENDING', 'DISPENSED') THEN
+        RAISE EXCEPTION 'medication order % cannot be dispensed in its current status', NEW.order_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_medication_dispensings_guard
+    BEFORE INSERT ON medication_dispensings
+    FOR EACH ROW EXECUTE FUNCTION guard_medication_dispensing();
+
+CREATE FUNCTION guard_medication_administration() RETURNS trigger AS $$
+BEGIN
+    IF (SELECT status FROM medication_orders WHERE id = NEW.order_id) <> 'DISPENSED' THEN
+        RAISE EXCEPTION 'medication order % can only be administered while it is DISPENSED', NEW.order_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_medication_administrations_guard
+    BEFORE INSERT ON medication_administrations
+    FOR EACH ROW EXECUTE FUNCTION guard_medication_administration();
