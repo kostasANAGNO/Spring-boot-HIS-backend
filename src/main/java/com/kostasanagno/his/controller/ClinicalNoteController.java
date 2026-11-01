@@ -1,11 +1,14 @@
 package com.kostasanagno.his.controller;
 
+import com.kostasanagno.his.audit.Audited;
 import com.kostasanagno.his.dto.ClinicalNoteAmendRequest;
 import com.kostasanagno.his.dto.ClinicalNoteRequest;
 import com.kostasanagno.his.dto.ClinicalNoteResponse;
 import com.kostasanagno.his.dto.ClinicalNoteSearchCriteria;
 import com.kostasanagno.his.dto.ClinicalNoteVersionResponse;
 import com.kostasanagno.his.dto.PageResponse;
+import com.kostasanagno.his.entity.AuditAction;
+import com.kostasanagno.his.entity.AuditResource;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.security.Caller;
 import com.kostasanagno.his.service.ClinicalNoteService;
@@ -44,6 +47,7 @@ public class ClinicalNoteController {
 
     @PostMapping
     @PreAuthorize(AccessRules.DOCTOR_ONLY)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.CREATE)
     @Operation(summary = "Write a clinical note as the logged-in doctor (DOCTOR only)")
     public ResponseEntity<ClinicalNoteResponse> create(@Valid @RequestBody ClinicalNoteRequest request,
             Authentication authentication) {
@@ -55,6 +59,7 @@ public class ClinicalNoteController {
 
     @GetMapping("/me")
     @PreAuthorize(AccessRules.DOCTOR_ONLY)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.VIEW)
     @Operation(summary = "Notes written by the logged-in doctor (DOCTOR only)")
     public PageResponse<ClinicalNoteResponse> myNotes(
             @ModelAttribute ClinicalNoteSearchCriteria criteria,
@@ -66,6 +71,7 @@ public class ClinicalNoteController {
 
     @GetMapping("/{id}")
     @PreAuthorize(AccessRules.CLINICAL_STAFF)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Get a clinical note with its current version (ADMIN, DOCTOR, NURSE)")
     public ClinicalNoteResponse getById(@PathVariable Long id) {
         return clinicalNoteService.getById(id);
@@ -73,6 +79,7 @@ public class ClinicalNoteController {
 
     @GetMapping("/{id}/versions")
     @PreAuthorize(AccessRules.CLINICAL_STAFF)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Every version of a note, oldest first (ADMIN, DOCTOR, NURSE)")
     public List<ClinicalNoteVersionResponse> versions(@PathVariable Long id) {
         return clinicalNoteService.getVersions(id);
@@ -80,6 +87,7 @@ public class ClinicalNoteController {
 
     @GetMapping
     @PreAuthorize(AccessRules.CLINICAL_STAFF)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.VIEW)
     @Operation(summary = "Search clinical notes (paged, sortable, filterable; ADMIN, DOCTOR, NURSE)")
     public PageResponse<ClinicalNoteResponse> search(
             @ModelAttribute ClinicalNoteSearchCriteria criteria,
@@ -89,6 +97,7 @@ public class ClinicalNoteController {
 
     @PutMapping("/{id}")
     @PreAuthorize(AccessRules.ADMIN_OR_DOCTOR)
+    @Audited(resource = AuditResource.CLINICAL_NOTE, action = AuditAction.AMEND, idArg = "id")
     @Operation(summary = "Amend a note: adds a new version (the author or an admin)")
     public ClinicalNoteResponse amend(@PathVariable Long id, @Valid @RequestBody ClinicalNoteAmendRequest request,
             Authentication authentication) {

@@ -1,5 +1,6 @@
 package com.kostasanagno.his.dto;
 
+import com.kostasanagno.his.audit.Auditable;
 import com.kostasanagno.his.entity.HospitalizationStatus;
 import java.time.Instant;
 
@@ -16,7 +17,18 @@ public record HospitalizationResponse(
         String diagnosis,
         String dischargeNotes,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt) implements Auditable {
+
+    @Override
+    public Long auditResourceId() {
+        return id;
+    }
+
+    @Override
+    public Long auditPatientId() {
+        return patient.id();
+    }
+
 
     /** Static (not an instance wither) so MapStruct does not mistake it for a setter. */
     public static HospitalizationResponse withCurrentBed(HospitalizationResponse source, BedSummary bed) {

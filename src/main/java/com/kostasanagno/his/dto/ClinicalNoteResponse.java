@@ -1,5 +1,6 @@
 package com.kostasanagno.his.dto;
 
+import com.kostasanagno.his.audit.Auditable;
 import java.time.Instant;
 
 /** The note with its CURRENT (latest) version; see {@code ClinicalNoteVersionResponse} for the history. */
@@ -18,5 +19,16 @@ public record ClinicalNoteResponse(
         String lastChangeReason,
         String editedBy,
         Instant createdAt,
-        Instant modifiedAt) {
+        Instant modifiedAt) implements Auditable {
+
+    @Override
+    public Long auditResourceId() {
+        return id;
+    }
+
+    @Override
+    public Long auditPatientId() {
+        return patient.id();
+    }
+
 }

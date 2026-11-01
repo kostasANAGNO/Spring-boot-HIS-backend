@@ -1,5 +1,6 @@
 package com.kostasanagno.his.dto;
 
+import com.kostasanagno.his.audit.Auditable;
 import com.kostasanagno.his.entity.AppointmentStatus;
 import java.time.Instant;
 
@@ -14,5 +15,16 @@ public record AppointmentResponse(
         String notes,
         String cancellationReason,
         Instant createdAt,
-        Instant updatedAt) {
+        Instant updatedAt) implements Auditable {
+
+    @Override
+    public Long auditResourceId() {
+        return id;
+    }
+
+    @Override
+    public Long auditPatientId() {
+        return patient.id();
+    }
+
 }

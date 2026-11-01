@@ -1,11 +1,14 @@
 package com.kostasanagno.his.controller;
 
+import com.kostasanagno.his.audit.Audited;
 import com.kostasanagno.his.dto.AppointmentRequest;
 import com.kostasanagno.his.dto.AppointmentResponse;
 import com.kostasanagno.his.dto.AppointmentSearchCriteria;
 import com.kostasanagno.his.dto.AppointmentUpdateRequest;
 import com.kostasanagno.his.dto.CancelAppointmentRequest;
 import com.kostasanagno.his.dto.PageResponse;
+import com.kostasanagno.his.entity.AuditAction;
+import com.kostasanagno.his.entity.AuditResource;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.service.AppointmentService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -41,6 +44,7 @@ public class AppointmentController {
 
     @PostMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.CREATE)
     @Operation(summary = "Book an appointment (409 if the doctor or the patient is already booked)")
     public ResponseEntity<AppointmentResponse> create(@Valid @RequestBody AppointmentRequest request) {
         AppointmentResponse created = appointmentService.create(request);
@@ -51,6 +55,7 @@ public class AppointmentController {
 
     @GetMapping("/me")
     @PreAuthorize(AccessRules.DOCTOR_ONLY)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.VIEW)
     @Operation(summary = "Appointments of the logged-in doctor (DOCTOR only)")
     public PageResponse<AppointmentResponse> myAppointments(
             Authentication authentication,
@@ -61,6 +66,7 @@ public class AppointmentController {
 
     @GetMapping("/{id}")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Get an appointment by id")
     public AppointmentResponse getById(@PathVariable Long id) {
         return appointmentService.getById(id);
@@ -68,6 +74,7 @@ public class AppointmentController {
 
     @GetMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.VIEW)
     @Operation(summary = "Search appointments (paged, sortable, filterable)")
     public PageResponse<AppointmentResponse> search(
             @ModelAttribute AppointmentSearchCriteria criteria,
@@ -77,6 +84,7 @@ public class AppointmentController {
 
     @PutMapping("/{id}")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.UPDATE, idArg = "id")
     @Operation(summary = "Update/reschedule a SCHEDULED appointment")
     public AppointmentResponse update(@PathVariable Long id, @Valid @RequestBody AppointmentUpdateRequest request) {
         return appointmentService.update(id, request);
@@ -84,6 +92,7 @@ public class AppointmentController {
 
     @PostMapping("/{id}/cancel")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.CANCEL, idArg = "id")
     @Operation(summary = "Cancel a SCHEDULED appointment (frees the slot)")
     public AppointmentResponse cancel(@PathVariable Long id, @Valid @RequestBody CancelAppointmentRequest request) {
         return appointmentService.cancel(id, request);
@@ -91,6 +100,7 @@ public class AppointmentController {
 
     @PostMapping("/{id}/complete")
     @PreAuthorize(AccessRules.COMPLETE_APPOINTMENT)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.COMPLETE, idArg = "id")
     @Operation(summary = "Complete a SCHEDULED appointment (ADMIN or the assigned DOCTOR)")
     public AppointmentResponse complete(@PathVariable Long id, Authentication authentication) {
         boolean admin = authentication.getAuthorities().stream().anyMatch(a -> ROLE_ADMIN.equals(a.getAuthority()));
@@ -99,6 +109,7 @@ public class AppointmentController {
 
     @PostMapping("/{id}/no-show")
     @PreAuthorize(AccessRules.MARK_NO_SHOW)
+    @Audited(resource = AuditResource.APPOINTMENT, action = AuditAction.NO_SHOW, idArg = "id")
     @Operation(summary = "Mark a SCHEDULED appointment as no-show")
     public AppointmentResponse noShow(@PathVariable Long id) {
         return appointmentService.markNoShow(id);

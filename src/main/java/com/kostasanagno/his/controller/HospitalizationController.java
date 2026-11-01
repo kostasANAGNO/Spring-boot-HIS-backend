@@ -1,5 +1,6 @@
 package com.kostasanagno.his.controller;
 
+import com.kostasanagno.his.audit.Audited;
 import com.kostasanagno.his.dto.AdmissionRequest;
 import com.kostasanagno.his.dto.BedAssignmentResponse;
 import com.kostasanagno.his.dto.DischargeRequest;
@@ -8,6 +9,8 @@ import com.kostasanagno.his.dto.HospitalizationSearchCriteria;
 import com.kostasanagno.his.dto.HospitalizationUpdateRequest;
 import com.kostasanagno.his.dto.PageResponse;
 import com.kostasanagno.his.dto.TransferRequest;
+import com.kostasanagno.his.entity.AuditAction;
+import com.kostasanagno.his.entity.AuditResource;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.security.Caller;
 import com.kostasanagno.his.service.HospitalizationService;
@@ -43,6 +46,7 @@ public class HospitalizationController {
 
     @PostMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.ADMIT)
     @Operation(summary = "Admit a patient into a bed (409 if the bed is occupied or the patient already admitted)")
     public ResponseEntity<HospitalizationResponse> admit(@Valid @RequestBody AdmissionRequest request,
             Authentication authentication) {
@@ -54,6 +58,7 @@ public class HospitalizationController {
 
     @GetMapping("/me")
     @PreAuthorize(AccessRules.DOCTOR_ONLY)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.VIEW)
     @Operation(summary = "Hospitalizations attended by the logged-in doctor (DOCTOR only)")
     public PageResponse<HospitalizationResponse> myHospitalizations(
             @ModelAttribute HospitalizationSearchCriteria criteria,
@@ -65,6 +70,7 @@ public class HospitalizationController {
 
     @GetMapping("/{id}")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Get a hospitalization (clinical fields are hidden from receptionists)")
     public HospitalizationResponse getById(@PathVariable Long id, Authentication authentication) {
         return hospitalizationService.getById(id, Caller.from(authentication));
@@ -72,6 +78,7 @@ public class HospitalizationController {
 
     @GetMapping("/{id}/bed-history")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Every bed the patient occupied during this hospitalization, oldest first")
     public List<BedAssignmentResponse> bedHistory(@PathVariable Long id, Authentication authentication) {
         return hospitalizationService.getBedHistory(id, Caller.from(authentication));
@@ -79,6 +86,7 @@ public class HospitalizationController {
 
     @GetMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.VIEW)
     @Operation(summary = "Search hospitalizations (paged, sortable, filterable)")
     public PageResponse<HospitalizationResponse> search(
             @ModelAttribute HospitalizationSearchCriteria criteria,
@@ -89,6 +97,7 @@ public class HospitalizationController {
 
     @PutMapping("/{id}")
     @PreAuthorize(AccessRules.ADMIN_OR_DOCTOR)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.UPDATE, idArg = "id")
     @Operation(summary = "Update reason, diagnosis and attending doctor while ADMITTED (ADMIN, DOCTOR)")
     public HospitalizationResponse update(@PathVariable Long id,
             @Valid @RequestBody HospitalizationUpdateRequest request, Authentication authentication) {
@@ -97,6 +106,7 @@ public class HospitalizationController {
 
     @PostMapping("/{id}/transfer")
     @PreAuthorize(AccessRules.CLINICAL_STAFF)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.TRANSFER, idArg = "id")
     @Operation(summary = "Move the patient to another free bed (ADMIN, DOCTOR, NURSE)")
     public HospitalizationResponse transfer(@PathVariable Long id, @Valid @RequestBody TransferRequest request,
             Authentication authentication) {
@@ -105,6 +115,7 @@ public class HospitalizationController {
 
     @PostMapping("/{id}/discharge")
     @PreAuthorize(AccessRules.ADMIN_OR_DOCTOR)
+    @Audited(resource = AuditResource.HOSPITALIZATION, action = AuditAction.DISCHARGE, idArg = "id")
     @Operation(summary = "Discharge the patient (ADMIN or the attending DOCTOR)")
     public HospitalizationResponse discharge(@PathVariable Long id, @Valid @RequestBody DischargeRequest request,
             Authentication authentication) {

@@ -1,9 +1,12 @@
 package com.kostasanagno.his.controller;
 
+import com.kostasanagno.his.audit.Audited;
 import com.kostasanagno.his.dto.PageResponse;
 import com.kostasanagno.his.dto.PatientRequest;
 import com.kostasanagno.his.dto.PatientResponse;
 import com.kostasanagno.his.dto.PatientSearchCriteria;
+import com.kostasanagno.his.entity.AuditAction;
+import com.kostasanagno.his.entity.AuditResource;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.service.PatientService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -38,6 +41,7 @@ public class PatientController {
 
     @PostMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.PATIENT, action = AuditAction.CREATE)
     @Operation(summary = "Register a patient")
     public ResponseEntity<PatientResponse> create(@Valid @RequestBody PatientRequest request) {
         PatientResponse created = patientService.create(request);
@@ -48,6 +52,7 @@ public class PatientController {
 
     @GetMapping("/{id}")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.PATIENT, action = AuditAction.VIEW, idArg = "id")
     @Operation(summary = "Get a patient by id")
     public PatientResponse getById(@PathVariable Long id) {
         return patientService.getById(id);
@@ -55,6 +60,7 @@ public class PatientController {
 
     @GetMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.PATIENT, action = AuditAction.VIEW)
     @Operation(summary = "Search patients (paged, sortable, filterable)")
     public PageResponse<PatientResponse> search(
             @ModelAttribute PatientSearchCriteria criteria,
@@ -64,6 +70,7 @@ public class PatientController {
 
     @PutMapping("/{id}")
     @PreAuthorize(AccessRules.ANY_STAFF)
+    @Audited(resource = AuditResource.PATIENT, action = AuditAction.UPDATE, idArg = "id")
     @Operation(summary = "Update a patient")
     public PatientResponse update(@PathVariable Long id, @Valid @RequestBody PatientRequest request) {
         return patientService.update(id, request);
@@ -72,6 +79,7 @@ public class PatientController {
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     @PreAuthorize(AccessRules.ADMIN_ONLY)
+    @Audited(resource = AuditResource.PATIENT, action = AuditAction.DELETE, idArg = "id")
     @Operation(summary = "Soft-delete a patient (ADMIN only)")
     public void delete(@PathVariable Long id) {
         patientService.delete(id);
