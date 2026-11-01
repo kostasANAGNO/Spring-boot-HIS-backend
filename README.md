@@ -92,6 +92,31 @@ Appointments cannot be deleted; cancelling keeps the history.
 | `POST /api/hospitalizations/{id}/transfer` | ADMIN, DOCTOR, NURSE |
 | `POST /api/hospitalizations/{id}/discharge` | ADMIN, or the attending DOCTOR |
 
+| Audit log endpoint | Roles |
+|---|---|
+| `GET /api/audit-events` | ADMIN (read-only; nothing can change or delete events) |
+
+### Audit log
+
+Every access to or change of patient-related data is recorded: **who** (username, roles), **what** (action and record),
+**which patient**, **when**, from which IP, and the **outcome** (`SUCCESS`, `DENIED` when the role was not allowed,
+`FAILED` for e.g. a missing record). It covers patients, appointments, hospitalizations and clinical notes (reads,
+searches, creates, updates and their actions such as cancel, discharge or amend) and the reading of the audit log itself.
+
+* A response that discloses several records (a search page, `/me`) writes **one event per record**, so
+  `GET /api/audit-events?patientId=5` answers "who looked at patient 5". An empty search leaves a single summary event.
+* Filters: `username`, `patientId`, `resourceType` (`PATIENT`, `APPOINTMENT`, `HOSPITALIZATION`, `CLINICAL_NOTE`,
+  `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
+* **Privacy:** only ids and request metadata are stored (path without the query string): no names, notes, diagnoses or
+  search terms. The table is append-only: the database refuses `UPDATE` and `DELETE`.
+* **No audit, no data:** the event is written before the response is sent. If it cannot be stored, the request fails
+  (for writes the change itself is already committed). Refused requests are recorded even though they return 403.
+* Not audited (yet): logins, doctors, wards/rooms/beds, users. The client IP is the direct connection address; behind a
+  proxy configure `server.forward-headers-strategy` so it reflects the real client.
+
+> **After pulling this change** reset the local DB (`V1` gained the `audit_events` table):
+> `docker compose down -v && docker compose up -d --wait`
+
 | Clinical notes endpoint | Roles |
 |---|---|
 | `POST /api/clinical-notes` | DOCTOR (the author is the doctor profile linked to the login) |

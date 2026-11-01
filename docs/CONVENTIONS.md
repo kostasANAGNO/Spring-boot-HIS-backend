@@ -95,6 +95,21 @@ or `*Impl` classes; use `@Slf4j` for logging.
   instead of being redacted. Authorship comes from the doctor profile linked to the logged-in user, never from a
   request field. Never log or `toString` the content.
 
+## Audit log
+
+* Audit is declarative: put `@Audited(resource = ..., action = ..., idArg = "id")` on EVERY controller method that
+  reads or changes patient-related data (new modules too). `AuditAspect` (package `audit`) does the rest; do not write
+  audit code in controllers or services. Add the new module to `AuditResource` (and its `ck_audit_events_resource_type`
+  CHECK in `V1`), and new actions to `AuditAction` (and `ck_audit_events_action`).
+* Make the module's response records implement `Auditable` (`auditResourceId()`, `auditPatientId()`) so the aspect
+  logs exactly the records a response disclosed (one event each, also for pages and `/me`). Sub-record or void
+  endpoints (versions, history, delete) use `idArg`; add the owning-patient lookup for a new resource to
+  `PatientIdResolver`.
+* The audit aspect is the OUTERMOST advice (above `@PreAuthorize`), so refused requests are recorded as `DENIED`.
+  The event is written in its own transaction (`REQUIRES_NEW`) before the response is returned: "no audit, no data".
+* Store ids and metadata only. Never names, free text, query strings or search terms, and `audit_events` has no
+  foreign keys so it outlives any data change. The table is append-only (trigger) and read only by ADMIN.
+
 ## Hiding clinical data by role
 
 * The controller builds a `Caller` (username + roles) from the `Authentication` and passes it to services that return
