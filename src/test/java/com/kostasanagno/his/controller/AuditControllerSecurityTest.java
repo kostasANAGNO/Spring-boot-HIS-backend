@@ -65,7 +65,7 @@ class AuditControllerSecurityTest {
     @Test
     void adminCanSearchWithFilters() throws Exception {
         var event = new AuditEventResponse(1L, Instant.parse("2030-01-01T00:00:00Z"), "nurse", "NURSE",
-                AuditAction.VIEW, AuditResource.PATIENT, 5L, 5L, AuditOutcome.SUCCESS, "GET", "/api/patients/5",
+                AuditAction.VIEW, AuditResource.PATIENT, 5L, 5L, AuditOutcome.SUCCESS, null, "GET", "/api/patients/5",
                 "10.0.0.1");
         when(auditService.search(any(), any())).thenReturn(new PageImpl<>(List.of(event), PageRequest.of(0, 20), 1));
 

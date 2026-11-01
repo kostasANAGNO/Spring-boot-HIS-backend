@@ -49,7 +49,7 @@ class AuditServiceImplTest {
     @Test
     void recordStoresOneEventPerTarget() {
         AuditEntry entry = new AuditEntry("dr.house", "DOCTOR", AuditAction.VIEW, AuditResource.CLINICAL_NOTE,
-                AuditOutcome.SUCCESS, "GET", "/api/clinical-notes", "10.0.0.1",
+                AuditOutcome.SUCCESS, null, "GET", "/api/clinical-notes", "10.0.0.1",
                 List.of(new AuditTarget(1L, 10L), new AuditTarget(2L, 11L)));
 
         service.record(entry);
@@ -75,17 +75,18 @@ class AuditServiceImplTest {
     void searchMapsEventsToResponses() {
         AuditEvent event = AuditEvent.builder().occurredAt(NOW).username("nurse").roles("NURSE")
                 .action(AuditAction.VIEW).resourceType(AuditResource.PATIENT).resourceId(1L).patientId(1L)
-                .outcome(AuditOutcome.DENIED).httpMethod("GET").path("/api/patients/1").build();
+                .outcome(AuditOutcome.DENIED).detail("BAD_CREDENTIALS").httpMethod("GET").path("/api/patients/1").build();
         event.setId(5L);
         Pageable pageable = PageRequest.of(0, 20);
         when(auditEventRepository.findAll(any(Specification.class), any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(event), pageable, 1));
 
         Page<AuditEventResponse> page = service.search(
-                new AuditEventSearchCriteria("nurse", 1L, null, null, null, AuditOutcome.DENIED, null, null), pageable);
+                new AuditEventSearchCriteria("nurse", 1L, null, null, null, AuditOutcome.DENIED, null, null, null), pageable);
 
         assertThat(page.getContent()).hasSize(1);
         assertThat(page.getContent().get(0).outcome()).isEqualTo(AuditOutcome.DENIED);
         assertThat(page.getContent().get(0).patientId()).isEqualTo(1L);
+        assertThat(page.getContent().get(0).detail()).isEqualTo("BAD_CREDENTIALS");
     }
 }

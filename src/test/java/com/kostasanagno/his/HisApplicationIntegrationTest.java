@@ -1075,6 +1075,71 @@ class HisApplicationIntegrationTest {
                 .hasMessageContaining("ck_audit_events_action");
     }
 
+    @Test
+    void loginsAndUserCreationAreAudited() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        assertThat(auditCount("username = 'admin' AND action = 'LOGIN' AND resource_type = 'USER' "
+                + "AND outcome = 'SUCCESS' AND roles = 'ADMIN' AND path = '/api/auth/login'")).isGreaterThanOrEqualTo(1);
+
+        // register a user (ADMIN): CREATE of a USER, tied to the new account; not about a patient
+        long created = registerUser(admin, "audit.login", "NURSE");
+        assertThat(auditCount("username = 'admin' AND action = 'CREATE' AND resource_type = 'USER' AND resource_id = ? "
+                + "AND patient_id IS NULL AND outcome = 'SUCCESS'", created)).isEqualTo(1);
+        // a nurse trying to register somebody is refused and recorded
+        String nurse = "Bearer " + login("audit.login", "Sup3rSecret!");
+        mockMvc.perform(post("/api/auth/register").header("Authorization", nurse)
+                .contentType(MediaType.APPLICATION_JSON).content("{}")).andExpect(status().isForbidden());
+        assertThat(auditCount("username = 'audit.login' AND action = 'CREATE' AND resource_type = 'USER' "
+                + "AND outcome = 'DENIED'")).isEqualTo(1);
+        assertThat(auditCount("username = 'audit.login' AND action = 'LOGIN' AND outcome = 'SUCCESS' "
+                + "AND roles = 'NURSE' AND resource_id = ?", created)).isEqualTo(1);
+
+        // a wrong password for a real account: recorded against that account, with a reason code
+        mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"audit.login\",\"password\":\"Wr0ngPassw0rd!\"}"))
+                .andExpect(status().isUnauthorized());
+        assertThat(auditCount("username = 'audit.login' AND action = 'LOGIN' AND outcome = 'DENIED' "
+                + "AND detail = 'BAD_CREDENTIALS' AND roles = '' AND resource_id = ?", created)).isEqualTo(1);
+
+        // a disabled account is told apart from a wrong password
+        jdbc.update("UPDATE users SET enabled = FALSE WHERE id = ?", created);
+        mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"audit.login\",\"password\":\"Sup3rSecret!\"}"))
+                .andExpect(status().isUnauthorized());
+        jdbc.update("UPDATE users SET enabled = TRUE WHERE id = ?", created);
+        assertThat(auditCount("username = 'audit.login' AND action = 'LOGIN' AND detail = 'ACCOUNT_DISABLED' "
+                + "AND outcome = 'DENIED'")).isEqualTo(1);
+
+        // a name that is not an account (maybe a password typed into the wrong box) is never stored
+        mockMvc.perform(post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"username\":\"TypedMyPassword-9\",\"password\":\"whatever123\"}"))
+                .andExpect(status().isUnauthorized());
+        assertThat(auditCount("username = 'unknown' AND action = 'LOGIN' AND outcome = 'DENIED' "
+                + "AND detail = 'BAD_CREDENTIALS' AND resource_id IS NULL")).isGreaterThanOrEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit_events WHERE username ILIKE '%TypedMyPassword%' "
+                + "OR path ILIKE '%TypedMyPassword%' OR detail ILIKE '%TypedMyPassword%'", Integer.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM audit_events WHERE username ILIKE '%Wr0ngPassw0rd%' "
+                + "OR path ILIKE '%Wr0ngPassw0rd%' OR detail ILIKE '%Wr0ngPassw0rd%'", Integer.class)).isZero();
+
+        // requests that merely carry a token are not logins
+        int loginsBefore = auditCount("action = 'LOGIN'");
+        mockMvc.perform(get("/api/patients").header("Authorization", nurse)).andExpect(status().isOk());
+        assertThat(auditCount("action = 'LOGIN'")).isEqualTo(loginsBefore);
+
+        // an admin can follow failed logins: by outcome, by address
+        mockMvc.perform(get("/api/audit-events").param("action", "LOGIN").param("outcome", "DENIED")
+                        .param("username", "audit.login").header("Authorization", admin))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalElements").value(2))
+                .andExpect(jsonPath("$.content[?(@.detail=='ACCOUNT_DISABLED')]").isNotEmpty())
+                .andExpect(jsonPath("$.content[?(@.detail=='BAD_CREDENTIALS')]").isNotEmpty());
+        mockMvc.perform(get("/api/audit-events").param("action", "LOGIN").param("outcome", "DENIED")
+                        .param("ipAddress", "127.0.0.1").header("Authorization", admin))
+                .andExpect(jsonPath("$.totalElements").value(org.hamcrest.Matchers.greaterThanOrEqualTo(3)));
+        mockMvc.perform(get("/api/audit-events").param("ipAddress", "203.0.113.99").header("Authorization", admin))
+                .andExpect(jsonPath("$.totalElements").value(0));
+    }
+
     private int auditCount(String where, Object... args) {
         return jdbc.queryForObject("SELECT count(*) FROM audit_events WHERE " + where, Integer.class, args);
     }
