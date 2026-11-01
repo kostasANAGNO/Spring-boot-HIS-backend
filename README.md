@@ -92,6 +92,33 @@ Appointments cannot be deleted; cancelling keeps the history.
 | `POST /api/hospitalizations/{id}/transfer` | ADMIN, DOCTOR, NURSE |
 | `POST /api/hospitalizations/{id}/discharge` | ADMIN, or the attending DOCTOR |
 
+| Clinical notes endpoint | Roles |
+|---|---|
+| `POST /api/clinical-notes` | DOCTOR (the author is the doctor profile linked to the login) |
+| `GET /api/clinical-notes`, `GET /api/clinical-notes/{id}`, `GET /api/clinical-notes/{id}/versions` | ADMIN, DOCTOR, NURSE |
+| `GET /api/clinical-notes/me` (notes written by the logged-in doctor) | DOCTOR |
+| `PUT /api/clinical-notes/{id}` (amend = add a new version) | the author DOCTOR, or ADMIN |
+
+Receptionists get **403** on every clinical-notes endpoint.
+
+### Medical records (clinical notes)
+
+* **What a note is:** free text sections (`history`, `examination`, `assessment`, `plan`, at least one required) plus an
+  optional ICD-10 `diagnosisCode` such as `I20.9` (validated and stored upper-case). It belongs to a patient and can be
+  linked to **one** appointment *or* one hospitalization of that same patient. Linking never changes the appointment or
+  hospitalization.
+* **Nothing is lost:** notes are never deleted or overwritten. An amendment (`PUT`) adds a new **version** holding the
+  full new content plus a required `changeReason`; `GET .../versions` returns every version, oldest first, with who
+  made it and when. The database enforces this: it refuses `UPDATE`/`DELETE` on versions and `DELETE` on notes.
+* **Concurrent edits:** an amendment must state the `baseVersion` it was based on. If someone amended in the
+  meantime the answer is **409** and nothing is saved (also guaranteed by a unique `(note, version)` constraint).
+* Only the author or an ADMIN can amend. Search filters: `patientId`, `authorDoctorId`, `appointmentId`,
+  `hospitalizationId`, `diagnosisCode` (prefix of the *current* version's code), `createdFrom`, `createdTo`.
+  Default sort is newest first. Note text is never logged.
+
+> **After pulling this change** reset the local DB (`V1` gained the clinical notes tables and the append-only
+> triggers): `docker compose down -v && docker compose up -d --wait`
+
 ### Hospitalizations
 
 * **Structure:** wards (seeded: Cardiology, Internal Medicine, Surgery, Orthopedics, Pediatrics, Intensive Care,

@@ -79,6 +79,22 @@ or `*Impl` classes; use `@Slf4j` for logging.
 * Fields that are only meaningful per page (like "is this bed occupied?") are computed with ONE extra query for the
   whole page (see `BedServiceImpl.search`, `HospitalizationServiceImpl.search`), never per row.
 
+## Versioned (append-only) records
+
+* Data that must never be lost (medical records) is a **header + versions** pair: the header holds identity and
+  links (`clinical_notes`), every state of the content is an immutable row in the versions table with
+  `version_number`, `change_reason` and `edited_by` (`clinical_note_versions`). The "current" content is the highest
+  version; fetch it for a whole page with ONE query (`findLatestByNoteIds`), never per row.
+* "Edit" means INSERT a new version. Enforce it in the database too: a `BEFORE UPDATE OR DELETE` trigger calling
+  `forbid_row_change()` (see `V1`); entity columns of version rows are `updatable = false`. Version entities extend
+  `IdentifiedEntity` (no `updated_at`) and carry their own `@CreatedDate`.
+* Optimistic concurrency without a `@Version` column: the amend request carries `baseVersion`; the service compares it
+  with the current version (409 with a clear message) and `UNIQUE (note_id, version_number)` is the safety net for a
+  race, mapped to 409 in `GlobalExceptionHandler`.
+* Records whose existence/content is clinical are blocked per role at the endpoint (`CLINICAL_STAFF`, `DOCTOR_ONLY`)
+  instead of being redacted. Authorship comes from the doctor profile linked to the logged-in user, never from a
+  request field. Never log or `toString` the content.
+
 ## Hiding clinical data by role
 
 * The controller builds a `Caller` (username + roles) from the `Authentication` and passes it to services that return
