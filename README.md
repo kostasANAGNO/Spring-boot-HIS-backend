@@ -83,8 +83,8 @@ Appointments cannot be deleted; cancelling keeps the history.
 
 | Hospitalization endpoint | Roles |
 |---|---|
-| `GET /api/wards[/{id}]`, `GET /api/rooms[/{id}]`, `GET /api/beds[/{id}]` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
-| `POST/PUT /api/wards\|rooms\|beds`, `PATCH .../{id}/deactivate` | ADMIN |
+| `GET /api/clinics[/{id}]`, `GET /api/wards[/{id}]`, `GET /api/rooms[/{id}]`, `GET /api/beds[/{id}]` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `POST/PUT /api/clinics\|wards\|rooms\|beds`, `PATCH .../{id}/deactivate` | ADMIN |
 | `POST /api/hospitalizations` (admit) | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
 | `GET /api/hospitalizations`, `GET /api/hospitalizations/{id}`, `GET /api/hospitalizations/{id}/bed-history` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
 | `GET /api/hospitalizations/me` (stays attended by the logged-in doctor) | DOCTOR |
@@ -187,10 +187,16 @@ Receptionists get **403** on every clinical-notes endpoint.
 
 ### Hospitalizations
 
-* **Structure:** wards (seeded: Cardiology, Internal Medicine, Surgery, Orthopedics, Pediatrics, Intensive Care,
-  Maternity) contain rooms, which contain beds. Rooms and beds are created through the API. Nothing is deleted; wards,
-  rooms and beds are *deactivated*, which is refused while any bed below them is occupied. Bed search filters:
-  `wardId`, `roomId`, `available` (true = nobody in it), `active` (default: active only).
+* **Structure:** **clinic -> ward (wing) -> room -> bed**. Clinics are the hospital's departments (seeded: Cardiology,
+  Internal Medicine, Surgery, Orthopedics, Pediatrics, Intensive Care, Maternity, linked to the matching specialty where
+  there is one); each seeded clinic has one starter ward called "Main Wing". Create more clinics, wards, rooms and beds
+  through the API. A ward name is unique inside its clinic, a room number inside its ward, a bed number inside its room.
+  Nothing is deleted; clinics, wards, rooms and beds are *deactivated*, which is refused while any bed below them is
+  occupied, and nothing new can be added under an inactive parent. A ward or room can be moved to another clinic/ward
+  only while nothing below it is occupied. Doctors can optionally belong to a clinic (`clinicId`). Search filters:
+  wards `clinicId`; rooms `clinicId`, `wardId`; beds `clinicId`, `wardId`, `roomId`, `available` (true = nobody in it),
+  `active` (default: active only); doctors `clinicId`; hospitalizations `clinicId` (current bed, or last bed once
+  discharged). Bed and room responses show the ward and clinic names.
 * **Flow:** `POST /api/hospitalizations` (admit, creates the stay and its first bed assignment) ->
   `POST .../transfer` (optional, any number of times) -> `POST .../discharge`. Status: `ADMITTED -> DISCHARGED`
   (final). `admissionTime` / `dischargeTime` default to now and must not be in the future. Only `ADMITTED` stays can be
@@ -208,7 +214,7 @@ Receptionists get **403** on every clinical-notes endpoint.
 * Search filters: `patientId`, `doctorId`, `wardId`, `bedId` (the current bed, or the last bed once discharged),
   `status`, `admittedFrom`, `admittedTo`. Default sort is `admissionTime` descending.
 
-> **After pulling this change** reset the local DB (`V1` gained the wards, rooms, beds, hospitalizations and
+> **After pulling this change** reset the local DB (`V1` gained the clinics, wards, rooms, beds, hospitalizations and
 > bed_assignments tables): `docker compose down -v && docker compose up -d --wait`
 
 ### Appointments
@@ -229,7 +235,7 @@ Receptionists get **403** on every clinical-notes endpoint.
 > **After pulling this change** reset the local DB (`V1` gained the `btree_gist` extension and the `appointments`
 > table): `docker compose down -v && docker compose up -d --wait`
 
-Doctor search filters: `name`, `licenseNumber`, `specialtyId`, `active` (omitted = active doctors only; `active=false`
+Doctor search filters: `name`, `licenseNumber`, `specialtyId`, `clinicId`, `active` (omitted = active doctors only; `active=false`
 lists soft-deleted ones). A doctor can optionally be linked to a login account via `userId` (must have the DOCTOR role
 and not be linked to another doctor). Specialties are a seeded lookup table (see `V1`).
 

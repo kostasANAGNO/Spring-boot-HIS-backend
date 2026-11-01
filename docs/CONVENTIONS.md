@@ -74,7 +74,11 @@ or `*Impl` classes; use `@Slf4j` for logging.
   `tstzrange(start_time, COALESCE(end_time, 'infinity'::timestamptz))`. "At most one open row per owner" and
   "one active record per patient" are partial unique indexes (`WHERE end_time IS NULL` / `WHERE status = 'ADMITTED'`).
   Add the matching branch in `GlobalExceptionHandler` for each new constraint name.
-* Soft structure (wards, rooms, beds) is deactivated, never deleted, and deactivation (or moving to another parent) is
+* The physical/organisational tree is `clinics -> wards -> rooms -> beds` (`Clinic` = department). Names are unique
+  inside the parent (`UNIQUE (parent_id, name)`), responses carry the names of their ancestors (`wardName`, `clinicName`)
+  so clients need no extra calls, and list/search endpoints offer a filter for every level. Repository graphs must fetch
+  the whole path (`bed.room.ward.clinic`). A new level goes in `V1` with its own seeded starter rows if useful.
+* Soft structure (clinics, wards, rooms, beds) is deactivated, never deleted, and deactivation (or moving to another parent) is
   rejected while an open assignment exists below it. Creating something inside a parent requires an active parent.
 * Fields that are only meaningful per page (like "is this bed occupied?") are computed with ONE extra query for the
   whole page (see `BedServiceImpl.search`, `HospitalizationServiceImpl.search`), never per row.
