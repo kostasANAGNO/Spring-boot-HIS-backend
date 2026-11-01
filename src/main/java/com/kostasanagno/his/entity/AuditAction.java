@@ -1,0 +1,5 @@
+package com.kostasanagno.his.entity;
+
+public enum AuditAction {
+    VIEW, CREATE, UPDATE, DELETE, CANCEL, COMPLETE, NO_SHOW, ADMIT, TRANSFER, DISCHARGE, AMEND
+}

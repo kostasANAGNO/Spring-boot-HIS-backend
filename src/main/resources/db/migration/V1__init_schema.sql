@@ -268,3 +268,37 @@ CREATE TRIGGER trg_clinical_note_versions_append_only
 CREATE TRIGGER trg_clinical_notes_no_delete
     BEFORE DELETE ON clinical_notes
     FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+-- ---------------------------------------------------------------------------------------------
+-- Audit log: who accessed or changed which patient-related record, when, and whether it was allowed.
+-- Append-only. Holds ids and metadata only, never names, notes or any clinical text.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE audit_events (
+    id            BIGSERIAL PRIMARY KEY,
+    occurred_at   TIMESTAMPTZ  NOT NULL,
+    username      VARCHAR(50)  NOT NULL,
+    roles         VARCHAR(100) NOT NULL,
+    action        VARCHAR(20)  NOT NULL,
+    resource_type VARCHAR(30)  NOT NULL,
+    resource_id   BIGINT,
+    patient_id    BIGINT,
+    outcome       VARCHAR(10)  NOT NULL,
+    http_method   VARCHAR(10)  NOT NULL,
+    path          VARCHAR(255) NOT NULL,
+    ip_address    VARCHAR(45),
+    CONSTRAINT ck_audit_events_action CHECK (action IN ('VIEW', 'CREATE', 'UPDATE', 'DELETE', 'CANCEL', 'COMPLETE',
+        'NO_SHOW', 'ADMIT', 'TRANSFER', 'DISCHARGE', 'AMEND')),
+    CONSTRAINT ck_audit_events_resource_type CHECK (resource_type IN ('PATIENT', 'APPOINTMENT', 'HOSPITALIZATION',
+        'CLINICAL_NOTE', 'AUDIT_LOG')),
+    CONSTRAINT ck_audit_events_outcome CHECK (outcome IN ('SUCCESS', 'DENIED', 'FAILED'))
+);
+
+-- "who looked at patient X" and "what did user Y do" are the two questions this table exists to answer
+CREATE INDEX idx_audit_events_patient ON audit_events (patient_id, occurred_at);
+CREATE INDEX idx_audit_events_username ON audit_events (username, occurred_at);
+CREATE INDEX idx_audit_events_resource ON audit_events (resource_type, resource_id);
+CREATE INDEX idx_audit_events_occurred_at ON audit_events (occurred_at);
+
+CREATE TRIGGER trg_audit_events_append_only
+    BEFORE UPDATE OR DELETE ON audit_events
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
