@@ -757,6 +757,236 @@ class HisApplicationIntegrationTest {
         }
     }
 
+    // ---- billing -------------------------------------------------------------------------------
+
+    @Test
+    void billingFlowPriceListInvoiceLinesIssuePaymentsAndRoles() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        registerUser(admin, "recep.bill", "RECEPTIONIST");
+        registerUser(admin, "nurse.bill", "NURSE");
+        String receptionist = "Bearer " + login("recep.bill", "Sup3rSecret!");
+        String nurse = "Bearer " + login("nurse.bill", "Sup3rSecret!");
+        long patient = createPatient(admin, "BL000000001");
+
+        // the seeded price list is readable by every role, maintained by ADMIN only
+        mockMvc.perform(get("/api/charge-items").header("Authorization", nurse))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(org.hamcrest.Matchers.greaterThanOrEqualTo(4)));
+        String item = "{\"code\":\"lab-bl1\",\"name\":\"Blood panel\",\"unitPrice\":33.33,\"vatRate\":13}";
+        mockMvc.perform(post("/api/charge-items").header("Authorization", receptionist)
+                .contentType(MediaType.APPLICATION_JSON).content(item)).andExpect(status().isForbidden());
+        long panel = idOf(mockMvc.perform(post("/api/charge-items").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content(item))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.code").value("LAB-BL1")));
+        mockMvc.perform(post("/api/charge-items").header("Authorization", admin)
+                .contentType(MediaType.APPLICATION_JSON).content(item)).andExpect(status().isConflict());
+        long consult = chargeItemId("CONSULT");
+
+        // nurses cannot bill; the receptionist builds a draft
+        mockMvc.perform(post("/api/invoices").header("Authorization", nurse).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"patientId\":" + patient + "}")).andExpect(status().isForbidden());
+        long invoice = idOf(mockMvc.perform(post("/api/invoices").header("Authorization", receptionist)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"patientId\":" + patient + "}"))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.status").value("DRAFT"))
+                .andExpect(jsonPath("$.invoiceNumber").doesNotExist()));
+        postLine(receptionist, invoice, consult, 2).andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalGross").value(100.00));
+        String withPanel = postLine(receptionist, invoice, panel, 3).andExpect(status().isOk())
+                .andExpect(jsonPath("$.lines.length()").value(2))
+                .andExpect(jsonPath("$.totalNet").value(199.99))     // 100.00 + 3 x 33.33
+                .andExpect(jsonPath("$.totalVat").value(13.00))      // 13% of 99.99 = 12.9987 -> 13.00
+                .andExpect(jsonPath("$.totalGross").value(212.99))
+                .andReturn().getResponse().getContentAsString();
+        long panelLine = objectMapper.readTree(withPanel).get("lines").get(1).get("id").asLong();
+        mockMvc.perform(delete("/api/invoices/" + invoice + "/lines/" + panelLine).header("Authorization", receptionist))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalGross").value(100.00));
+        postLine(receptionist, invoice, panel, 3).andExpect(status().isOk());   // 212.99 again
+
+        // a later price change does not touch the invoice
+        mockMvc.perform(put("/api/charge-items/" + panel).header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"code\":\"LAB-BL1\",\"name\":\"Blood panel\",\"unitPrice\":99.00,\"vatRate\":13}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/invoices/" + invoice).header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalGross").value(212.99));
+
+        // issue: numbered and frozen
+        mockMvc.perform(post("/api/invoices/" + invoice + "/issue").header("Authorization", receptionist))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("ISSUED"))
+                .andExpect(jsonPath("$.invoiceNumber").value(org.hamcrest.Matchers.matchesPattern("INV-\\d{4}-\\d{6}")))
+                .andExpect(jsonPath("$.outstandingAmount").value(212.99));
+        postLine(receptionist, invoice, consult, 1).andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/invoices/" + invoice + "/issue").header("Authorization", receptionist))
+                .andExpect(status().isBadRequest());
+
+        // payments: partial, over-payment refused, the rest makes it PAID, nothing more is accepted
+        pay(receptionist, invoice, "100.00", "CASH").andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("ISSUED"))
+                .andExpect(jsonPath("$.paidAmount").value(100.00))
+                .andExpect(jsonPath("$.outstandingAmount").value(112.99));
+        pay(receptionist, invoice, "113.00", "CARD").andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/invoices").param("patientId", String.valueOf(patient)).param("outstanding", "true")
+                        .header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1))
+                .andExpect(jsonPath("$.content[0].outstandingAmount").value(112.99));
+        pay(admin, invoice, "112.99", "BANK_TRANSFER").andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PAID")).andExpect(jsonPath("$.outstandingAmount").value(0.0));
+        pay(receptionist, invoice, "0.01", "CASH").andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/invoices/" + invoice + "/payments").header("Authorization", nurse))
+                .andExpect(jsonPath("$.length()").value(2))
+                .andExpect(jsonPath("$[0].recordedBy").value("recep.bill"))
+                .andExpect(jsonPath("$[1].recordedBy").value("admin"));
+
+        // only an admin cancels, and not a paid invoice
+        mockMvc.perform(post("/api/invoices/" + invoice + "/cancel").header("Authorization", receptionist)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"x\"}")).andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/invoices/" + invoice + "/cancel").header("Authorization", admin)
+                .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"x\"}")).andExpect(status().isBadRequest());
+        mockMvc.perform(delete("/api/invoices/" + invoice).header("Authorization", admin)).andExpect(status().is4xxClientError());
+
+        // billing activity is in the audit trail, tied to the patient
+        assertThat(auditCount("username = 'recep.bill' AND resource_type = 'INVOICE' AND action = 'PAY' "
+                + "AND patient_id = ? AND resource_id = ? AND outcome = 'SUCCESS'", patient, invoice)).isEqualTo(1);
+        assertThat(auditCount("username = 'recep.bill' AND resource_type = 'INVOICE' AND action = 'ISSUE' "
+                + "AND patient_id = ? AND outcome = 'SUCCESS'", patient)).isEqualTo(1);
+        assertThat(auditCount("username = 'nurse.bill' AND resource_type = 'INVOICE' AND action = 'CREATE' "
+                + "AND outcome = 'DENIED'")).isEqualTo(1);
+    }
+
+    @Test
+    void aDischargedStayIsInvoicedOncePerBedDay() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long room = createRoom(admin, wardId("Surgery"), "S-BL1");
+        long bed = createBed(admin, room, "1");
+        long patient = createPatient(admin, "BL000000010");
+        long doctor = createDoctor(admin, "BL-DOC-1");
+        Instant admittedAt = Instant.now().minus(50, ChronoUnit.HOURS);
+        long stay = idOf(mockMvc.perform(post("/api/hospitalizations").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(("{\"patientId\":%d,\"attendingDoctorId\":%d,\"bedId\":%d,\"admissionReason\":\"Surgery\","
+                                + "\"admissionTime\":\"%s\"}").formatted(patient, doctor, bed, admittedAt)))
+                .andExpect(status().isCreated()));
+
+        mockMvc.perform(post("/api/invoices/from-hospitalization/" + stay).header("Authorization", admin))
+                .andExpect(status().isBadRequest());   // still admitted
+        mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                .andExpect(status().isOk());
+
+        // 50 hours = 3 started days x 150.00
+        long invoice = idOf(mockMvc.perform(post("/api/invoices/from-hospitalization/" + stay)
+                        .header("Authorization", admin))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.hospitalizationId").value(stay))
+                .andExpect(jsonPath("$.lines[0].code").value("BED-DAY"))
+                .andExpect(jsonPath("$.lines[0].quantity").value(3))
+                .andExpect(jsonPath("$.totalGross").value(450.00)));
+        mockMvc.perform(post("/api/invoices/from-hospitalization/" + stay).header("Authorization", admin))
+                .andExpect(status().isConflict());
+
+        // cancelling frees the stay for a new invoice
+        mockMvc.perform(post("/api/invoices/" + invoice + "/cancel").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"reason\":\"Wrong period\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.status").value("CANCELLED"));
+        mockMvc.perform(post("/api/invoices/from-hospitalization/" + stay).header("Authorization", admin))
+                .andExpect(status().isCreated());
+    }
+
+    @Test
+    void theDatabaseProtectsIssuedInvoicesAndPayments() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "BL000000020");
+        long invoice = idOf(mockMvc.perform(post("/api/invoices").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"patientId\":" + patient + "}"))
+                .andExpect(status().isCreated()));
+        postLine(admin, invoice, chargeItemId("CONSULT"), 2).andExpect(status().isOk());
+        mockMvc.perform(post("/api/invoices/" + invoice + "/issue").header("Authorization", admin)).andExpect(status().isOk());
+        pay(admin, invoice, "40.00", "CASH").andExpect(status().isOk());
+
+        // lines of a non-draft invoice are frozen
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM invoice_lines WHERE invoice_id = ?", invoice))
+                .hasMessageContaining("DRAFT");
+        assertThatThrownBy(() -> jdbc.update("UPDATE invoice_lines SET quantity = 1, net_amount = 50, gross_amount = 50 "
+                + "WHERE invoice_id = ?", invoice)).hasMessageContaining("DRAFT");
+        assertThatThrownBy(() -> jdbc.update("INSERT INTO invoice_lines (invoice_id, charge_item_id, code, description, "
+                + "quantity, unit_price, vat_rate, net_amount, vat_amount, gross_amount, created_at, updated_at) "
+                + "VALUES (?, ?, 'X', 'x', 1, 1.00, 0, 1.00, 0, 1.00, now(), now())", invoice, chargeItemId("CONSULT")))
+                .hasMessageContaining("DRAFT");
+        // an issued invoice cannot change its amounts or number
+        assertThatThrownBy(() -> jdbc.update("UPDATE invoices SET total_net = 1, total_gross = 1 WHERE id = ?", invoice))
+                .hasMessageContaining("cannot change");
+        assertThatThrownBy(() -> jdbc.update("UPDATE invoices SET invoice_number = 'INV-HACKED' WHERE id = ?", invoice))
+                .hasMessageContaining("cannot change");
+        // invoices are never deleted, payments never rewritten, and nothing can be over-paid
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM invoices WHERE id = ?", invoice)).hasMessageContaining("not allowed");
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET amount = 1 WHERE invoice_id = ?", invoice))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM payments WHERE invoice_id = ?", invoice))
+                .hasMessageContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("UPDATE invoices SET paid_amount = 100.01 WHERE id = ?", invoice))
+                .isInstanceOf(DataIntegrityViolationException.class).hasMessageContaining("ck_invoices_paid_range");
+        // a paid invoice must be flagged PAID and vice versa
+        assertThatThrownBy(() -> jdbc.update("UPDATE invoices SET paid_amount = 100.00 WHERE id = ?", invoice))
+                .isInstanceOf(DataIntegrityViolationException.class).hasMessageContaining("ck_invoices_paid_iff_fully_paid");
+    }
+
+    @Test
+    void concurrentPaymentsNeverOverPayAnInvoice() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        long patient = createPatient(admin, "BL000000030");
+        long invoice = idOf(mockMvc.perform(post("/api/invoices").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"patientId\":" + patient + "}"))
+                .andExpect(status().isCreated()));
+        postLine(admin, invoice, chargeItemId("CONSULT"), 2).andExpect(status().isOk());   // 100.00
+        mockMvc.perform(post("/api/invoices/" + invoice + "/issue").header("Authorization", admin)).andExpect(status().isOk());
+
+        int requests = 8;   // 8 x 20.00 against 100.00 due: exactly 5 can succeed
+        CountDownLatch ready = new CountDownLatch(requests);
+        CountDownLatch go = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(requests);
+        try {
+            List<Future<Integer>> results = new ArrayList<>();
+            for (int i = 0; i < requests; i++) {
+                Callable<Integer> payment = () -> {
+                    ready.countDown();
+                    go.await();
+                    return pay(admin, invoice, "20.00", "CARD").andReturn().getResponse().getStatus();
+                };
+                results.add(pool.submit(payment));
+            }
+            ready.await();
+            go.countDown();
+            List<Integer> statuses = new ArrayList<>();
+            for (Future<Integer> result : results) {
+                statuses.add(result.get());
+            }
+            assertThat(statuses).filteredOn(code -> code == 200).hasSize(5);
+            assertThat(statuses).filteredOn(code -> code == 400).hasSize(requests - 5);
+        } finally {
+            pool.shutdownNow();
+        }
+        assertThat(jdbc.queryForObject("SELECT paid_amount FROM invoices WHERE id = ?", java.math.BigDecimal.class, invoice))
+                .isEqualByComparingTo("100.00");
+        assertThat(jdbc.queryForObject("SELECT status FROM invoices WHERE id = ?", String.class, invoice)).isEqualTo("PAID");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM payments WHERE invoice_id = ?", Integer.class, invoice))
+                .isEqualTo(5);
+    }
+
+    private long chargeItemId(String code) {
+        return jdbc.queryForObject("SELECT id FROM charge_items WHERE code = ?", Long.class, code);
+    }
+
+    private ResultActions postLine(String auth, long invoiceId, long chargeItemId, int quantity) throws Exception {
+        return mockMvc.perform(post("/api/invoices/" + invoiceId + "/lines").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"chargeItemId\":%d,\"quantity\":%d}".formatted(chargeItemId, quantity)));
+    }
+
+    private ResultActions pay(String auth, long invoiceId, String amount, String method) throws Exception {
+        return mockMvc.perform(post("/api/invoices/" + invoiceId + "/payments").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"amount\":%s,\"method\":\"%s\"}".formatted(amount, method)));
+    }
+
     // ---- audit log -----------------------------------------------------------------------------
 
     @Test
