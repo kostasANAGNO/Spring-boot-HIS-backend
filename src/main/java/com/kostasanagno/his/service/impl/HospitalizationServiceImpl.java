@@ -136,7 +136,7 @@ public class HospitalizationServiceImpl implements HospitalizationService {
         Doctor doctor = doctorRepository.findByUserUsernameIgnoreCaseAndActiveTrue(caller.username())
                 .orElseThrow(() -> new ResourceNotFoundException("No doctor profile is linked to the current user"));
         HospitalizationSearchCriteria own = (criteria == null
-                ? new HospitalizationSearchCriteria(null, null, null, null, null, null, null) : criteria)
+                ? new HospitalizationSearchCriteria(null, null, null, null, null, null, null, null) : criteria)
                 .withDoctorId(doctor.getId());
         return search(own, pageable, caller);
     }

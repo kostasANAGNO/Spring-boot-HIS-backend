@@ -2,6 +2,7 @@ package com.kostasanagno.his.controller;
 
 import com.kostasanagno.his.dto.WardRequest;
 import com.kostasanagno.his.dto.WardResponse;
+import com.kostasanagno.his.dto.WardSearchCriteria;
 import com.kostasanagno.his.security.AccessRules;
 import com.kostasanagno.his.service.WardService;
 import io.swagger.v3.oas.annotations.Operation;
@@ -12,13 +13,13 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.ModelAttribute;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
@@ -32,7 +33,7 @@ public class WardController {
 
     @PostMapping
     @PreAuthorize(AccessRules.ADMIN_ONLY)
-    @Operation(summary = "Create a ward (ADMIN only)")
+    @Operation(summary = "Create a ward inside a clinic (ADMIN only)")
     public ResponseEntity<WardResponse> create(@Valid @RequestBody WardRequest request) {
         WardResponse created = wardService.create(request);
         var location = ServletUriComponentsBuilder.fromCurrentRequest().path("/{id}")
@@ -42,9 +43,9 @@ public class WardController {
 
     @GetMapping
     @PreAuthorize(AccessRules.ANY_STAFF)
-    @Operation(summary = "List wards (active ones unless active=false)")
-    public List<WardResponse> findAll(@RequestParam(required = false) Boolean active) {
-        return wardService.findAll(active);
+    @Operation(summary = "List wards (active ones unless active=false; filter: clinicId)")
+    public List<WardResponse> findAll(@ModelAttribute WardSearchCriteria criteria) {
+        return wardService.findAll(criteria);
     }
 
     @GetMapping("/{id}")
@@ -56,7 +57,7 @@ public class WardController {
 
     @PutMapping("/{id}")
     @PreAuthorize(AccessRules.ADMIN_ONLY)
-    @Operation(summary = "Rename a ward (ADMIN only)")
+    @Operation(summary = "Rename a ward or move it to another clinic (ADMIN only)")
     public WardResponse update(@PathVariable Long id, @Valid @RequestBody WardRequest request) {
         return wardService.update(id, request);
     }
