@@ -92,6 +92,40 @@ Appointments cannot be deleted; cancelling keeps the history.
 | `POST /api/hospitalizations/{id}/transfer` | ADMIN, DOCTOR, NURSE |
 | `POST /api/hospitalizations/{id}/discharge` | ADMIN, or the attending DOCTOR |
 
+| Billing endpoint | Roles |
+|---|---|
+| `GET /api/charge-items[/{id}]` (price list) | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `POST/PUT /api/charge-items`, `PATCH /api/charge-items/{id}/deactivate` | ADMIN |
+| `GET /api/invoices`, `GET /api/invoices/{id}`, `GET /api/invoices/{id}/payments` | ADMIN, DOCTOR, NURSE, RECEPTIONIST |
+| `POST /api/invoices`, `POST /api/invoices/from-hospitalization/{id}`, `POST .../{id}/lines`, `DELETE .../{id}/lines/{lineId}`, `POST .../{id}/issue`, `POST .../{id}/payments` | ADMIN, RECEPTIONIST |
+| `POST /api/invoices/{id}/cancel` | ADMIN |
+
+### Billing
+
+* **Price list:** `charge_items` have a `code`, `name`, `unitPrice` (EUR, without VAT) and a `vatRate` percentage. A
+  starter list is seeded (`CONSULT`, `BED-DAY`, `ECG`, `XRAY`) with **placeholder prices**: change them through the
+  API. Entries are deactivated, never deleted. A price change never affects existing invoices.
+* **Invoice flow:** `DRAFT` (add or remove lines) -> `ISSUED` (gets its number `INV-<year>-<6 digits>`, frozen) ->
+  `PAID` (when the payments add up to the total). A `DRAFT` or an unpaid `ISSUED` invoice can be `CANCELLED` (ADMIN, with a
+  reason); an invoice with payments cannot (refunds and credit notes are not implemented). Invoices and payments are
+  never deleted.
+* **Lines are snapshots:** the code, description, price and VAT rate are copied from the price list when the line is
+  added. Per line: `net = quantity x price`, `VAT = net x rate / 100` rounded half-up to cents, `gross = net + VAT`; the
+  invoice totals are the sums of its lines. Amounts use exactly two decimals.
+* **Payments** (`CASH`, `CARD`, `BANK_TRANSFER`, optional reference) are accepted only on `ISSUED` invoices, can be
+  partial, and can never exceed what is still due. The invoice row is locked while it changes, so concurrent payments
+  cannot over-pay it (a database constraint is the safety net). Payments are append-only.
+* **Invoicing a stay:** `POST /api/invoices/from-hospitalization/{id}` creates a `DRAFT` for a *discharged*
+  hospitalization with one `BED-DAY` unit per started 24 hours of the stay (minimum one). A visit or a stay can have only
+  one active invoice (a cancelled one frees it); an invoice can also be linked to one appointment.
+* **Database protection:** lines of a non-draft invoice, the amounts/number/patient of an issued invoice, payments and
+  invoice rows cannot be changed or deleted, even with raw SQL.
+* This is an internal billing record, **not** a fiscal/tax document: there is no gap-free legal numbering or
+  integration with a tax authority. Invoice activity is part of the audit log.
+
+> **After pulling this change** reset the local DB (`V1` gained the billing tables, triggers and the invoice number
+> sequence): `docker compose down -v && docker compose up -d --wait`
+
 | Audit log endpoint | Roles |
 |---|---|
 | `GET /api/audit-events` | ADMIN (read-only; nothing can change or delete events) |
@@ -100,13 +134,13 @@ Appointments cannot be deleted; cancelling keeps the history.
 
 Every access to or change of patient-related data is recorded: **who** (username, roles), **what** (action and record),
 **which patient**, **when**, from which IP, and the **outcome** (`SUCCESS`, `DENIED` when the role was not allowed,
-`FAILED` for e.g. a missing record). It covers patients, appointments, hospitalizations and clinical notes (reads,
+`FAILED` for e.g. a missing record). It covers patients, appointments, hospitalizations, clinical notes and invoices (reads,
 searches, creates, updates and their actions such as cancel, discharge or amend) and the reading of the audit log itself.
 
 * A response that discloses several records (a search page, `/me`) writes **one event per record**, so
   `GET /api/audit-events?patientId=5` answers "who looked at patient 5". An empty search leaves a single summary event.
 * Filters: `username`, `patientId`, `resourceType` (`PATIENT`, `APPOINTMENT`, `HOSPITALIZATION`, `CLINICAL_NOTE`,
-  `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
+  `INVOICE`, `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
 * **Privacy:** only ids and request metadata are stored (path without the query string): no names, notes, diagnoses or
   search terms. The table is append-only: the database refuses `UPDATE` and `DELETE`.
 * **No audit, no data:** the event is written before the response is sent. If it cannot be stored, the request fails

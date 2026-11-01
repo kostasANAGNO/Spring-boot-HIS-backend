@@ -95,6 +95,22 @@ or `*Impl` classes; use `@Slf4j` for logging.
   instead of being redacted. Authorship comes from the doctor profile linked to the logged-in user, never from a
   request field. Never log or `toString` the content.
 
+## Money and billing
+
+* Amounts are `BigDecimal` with exactly 2 decimals in the single currency (EUR), `NUMERIC(12,2)` in the database,
+  VAT rates `NUMERIC(5,2)`. Never use `double`/`float`. All arithmetic is in ONE place in the service (see
+  `InvoiceServiceImpl`): per-line rounding `HALF_UP` to cents, totals are sums of the rounded lines.
+* Price-bearing records are **snapshots**: when a line is created it copies code, description, price and VAT from the
+  catalog; catalog edits never change existing documents. Encode the arithmetic in CHECK constraints
+  (`net = quantity * unit_price`, `gross = net + vat`, `paid <= total`).
+* A document with a life cycle (invoice) mutates only through the enum's `canTransitionTo`, and the row is locked
+  (`findByIdForUpdate`, `PESSIMISTIC_WRITE`) before any change so concurrent requests are serialized. Pair that with
+  database guards: triggers that freeze children/amounts once issued, append-only payments, no deletes.
+* "At most one active document per source" is a partial unique index excluding the cancelled status
+  (`uq_invoices_active_hospitalization`), so cancelling frees the source again.
+* Roles: money is handled by `AccessRules.BILLING_STAFF` (ADMIN, RECEPTIONIST); cancelling is ADMIN only; everyone
+  with `ANY_STAFF` may read. Tunable business codes (e.g. the bed-day item) live in a `@ConfigurationProperties` record.
+
 ## Audit log
 
 * Audit is declarative: put `@Audited(resource = ..., action = ..., idArg = "id")` on EVERY controller method that
