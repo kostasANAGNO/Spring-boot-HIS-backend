@@ -211,3 +211,60 @@ CREATE UNIQUE INDEX uq_bed_assignments_hospitalization_open ON bed_assignments (
 
 CREATE INDEX idx_bed_assignments_hospitalization ON bed_assignments (hospitalization_id, start_time);
 CREATE INDEX idx_bed_assignments_bed ON bed_assignments (bed_id);
+
+-- ---------------------------------------------------------------------------------------------
+-- Medical records: clinical notes. A note is a header plus an append-only list of versions;
+-- an amendment adds a new version, nothing is ever updated or deleted.
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE clinical_notes (
+    id                 BIGSERIAL PRIMARY KEY,
+    patient_id         BIGINT      NOT NULL REFERENCES patients (id),
+    author_doctor_id   BIGINT      NOT NULL REFERENCES doctors (id),
+    appointment_id     BIGINT REFERENCES appointments (id),
+    hospitalization_id BIGINT REFERENCES hospitalizations (id),
+    created_at         TIMESTAMPTZ NOT NULL,
+    updated_at         TIMESTAMPTZ NOT NULL,
+    CONSTRAINT ck_clinical_notes_single_link CHECK (appointment_id IS NULL OR hospitalization_id IS NULL)
+);
+
+CREATE INDEX idx_clinical_notes_patient ON clinical_notes (patient_id, created_at);
+CREATE INDEX idx_clinical_notes_author ON clinical_notes (author_doctor_id);
+CREATE INDEX idx_clinical_notes_appointment ON clinical_notes (appointment_id);
+CREATE INDEX idx_clinical_notes_hospitalization ON clinical_notes (hospitalization_id);
+
+CREATE TABLE clinical_note_versions (
+    id                BIGSERIAL PRIMARY KEY,
+    note_id           BIGINT      NOT NULL REFERENCES clinical_notes (id),
+    version_number    INTEGER     NOT NULL,
+    history           VARCHAR(4000),
+    examination       VARCHAR(4000),
+    assessment        VARCHAR(4000),
+    plan              VARCHAR(4000),
+    diagnosis_code    VARCHAR(10),
+    change_reason     VARCHAR(500),
+    edited_by_user_id BIGINT      NOT NULL REFERENCES users (id),
+    created_at        TIMESTAMPTZ NOT NULL,
+    -- two concurrent amendments cannot both become version N+1
+    CONSTRAINT uq_clinical_note_versions_note_version UNIQUE (note_id, version_number),
+    CONSTRAINT ck_clinical_note_versions_version_positive CHECK (version_number >= 1),
+    CONSTRAINT ck_clinical_note_versions_has_content
+        CHECK (COALESCE(history, examination, assessment, plan, diagnosis_code) IS NOT NULL)
+);
+
+CREATE INDEX idx_clinical_note_versions_diagnosis ON clinical_note_versions (diagnosis_code);
+
+-- Medical history is never rewritten or removed: the database itself refuses UPDATE/DELETE on versions
+-- and DELETE on notes, whatever the application does.
+CREATE FUNCTION forbid_row_change() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION '% on % is not allowed (append-only medical record)', TG_OP, TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_clinical_note_versions_append_only
+    BEFORE UPDATE OR DELETE ON clinical_note_versions
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+CREATE TRIGGER trg_clinical_notes_no_delete
+    BEFORE DELETE ON clinical_notes
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
