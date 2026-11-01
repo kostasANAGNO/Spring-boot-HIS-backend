@@ -459,7 +459,7 @@ class HisApplicationIntegrationTest {
         String auth = "Bearer " + login("admin", "Admin123!");
 
         mockMvc.perform(get("/api/wards").header("Authorization", auth))
-                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(7));
+                .andExpect(status().isOk()).andExpect(jsonPath("$.length()").value(org.hamcrest.Matchers.greaterThanOrEqualTo(7)));
         long ward = wardId("Surgery");
         long room = createRoom(auth, ward, "S-100");
         createBed(auth, room, "A");
@@ -470,7 +470,8 @@ class HisApplicationIntegrationTest {
                         .content("{\"wardId\":" + ward + ",\"roomNumber\":\"S-100\"}"))
                 .andExpect(status().isConflict());
         mockMvc.perform(get("/api/beds").param("roomId", String.valueOf(room)).header("Authorization", auth))
-                .andExpect(jsonPath("$.content[0].wardName").value("Surgery"))
+                .andExpect(jsonPath("$.content[0].wardName").value("Main Wing"))
+                .andExpect(jsonPath("$.content[0].clinicName").value("Surgery"))
                 .andExpect(jsonPath("$.content[0].roomNumber").value("S-100"))
                 .andExpect(jsonPath("$.content[0].occupied").value(false));
     }
@@ -488,7 +489,8 @@ class HisApplicationIntegrationTest {
 
         long stayA = idOf(admit(auth, patientA, doctor, bed1).andExpect(status().isCreated())
                 .andExpect(jsonPath("$.currentBed.id").value(bed1))
-                .andExpect(jsonPath("$.currentBed.wardName").value("Cardiology"))
+                .andExpect(jsonPath("$.currentBed.wardName").value("Main Wing"))
+                .andExpect(jsonPath("$.currentBed.clinicName").value("Cardiology"))
                 .andExpect(jsonPath("$.diagnosis").value("Suspected angina")));
 
         // bed occupied, patient already admitted
@@ -755,6 +757,95 @@ class HisApplicationIntegrationTest {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    // ---- clinics -------------------------------------------------------------------------------
+
+    @Test
+    void clinicsAreSeededAndTheHierarchyClinicWardRoomBedWorks() throws Exception {
+        String admin = "Bearer " + login("admin", "Admin123!");
+        registerUser(admin, "nurse.clinic", "NURSE");
+        String nurse = "Bearer " + login("nurse.clinic", "Sup3rSecret!");
+
+        // seeded clinics, linked to a specialty where one matches; read by everyone, written by ADMIN
+        mockMvc.perform(get("/api/clinics").header("Authorization", nurse))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(org.hamcrest.Matchers.greaterThanOrEqualTo(7)))
+                .andExpect(jsonPath("$[?(@.name=='Cardiology')].specialty.name").value("Cardiology"));
+        mockMvc.perform(post("/api/clinics").header("Authorization", nurse).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"Nope\"}")).andExpect(status().isForbidden());
+
+        // a new clinic with its own wing, room and bed; names only need to be unique inside the parent
+        long specialty = jdbc.queryForObject("SELECT id FROM specialties WHERE name = 'Dermatology'", Long.class);
+        long clinic = createClinic(admin, "Dermatology Clinic", specialty);
+        mockMvc.perform(post("/api/clinics").header("Authorization", admin).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"dermatology clinic\"}")).andExpect(status().isConflict());
+        long wing = createWard(admin, clinic, "North Wing");
+        createWard(admin, clinicId("Cardiology"), "North Wing");                 // same name, other clinic: fine
+        mockMvc.perform(post("/api/wards").header("Authorization", admin).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clinicId\":%d,\"name\":\"north wing\"}".formatted(clinic)))
+                .andExpect(status().isConflict());
+        long room = createRoom(admin, wing, "D-101");
+        long bed = createBed(admin, room, "1");
+        mockMvc.perform(get("/api/beds/" + bed).header("Authorization", nurse))
+                .andExpect(jsonPath("$.clinicName").value("Dermatology Clinic"))
+                .andExpect(jsonPath("$.wardName").value("North Wing"))
+                .andExpect(jsonPath("$.roomNumber").value("D-101"));
+
+        // filters at every level
+        mockMvc.perform(get("/api/wards").param("clinicId", String.valueOf(clinic)).header("Authorization", nurse))
+                .andExpect(jsonPath("$.length()").value(1)).andExpect(jsonPath("$[0].clinicName").value("Dermatology Clinic"));
+        mockMvc.perform(get("/api/rooms").param("clinicId", String.valueOf(clinic)).header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1)).andExpect(jsonPath("$.content[0].clinicName").value("Dermatology Clinic"));
+        mockMvc.perform(get("/api/beds").param("clinicId", String.valueOf(clinic)).param("available", "true")
+                        .header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1)).andExpect(jsonPath("$.content[0].id").value(bed));
+        mockMvc.perform(get("/api/beds").param("clinicId", String.valueOf(clinicId("Cardiology")))
+                        .param("roomId", String.valueOf(room)).header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(0));
+
+        // a doctor can belong to a clinic and be found by it
+        long doctor = idOf(mockMvc.perform(post("/api/doctors").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"firstName\":\"Anna\",\"lastName\":\"Skin\",\"licenseNumber\":\"CL-DOC-1\","
+                                + "\"specialtyId\":%d,\"clinicId\":%d}".formatted(specialty, clinic)))
+                .andExpect(status().isCreated()).andExpect(jsonPath("$.clinic.name").value("Dermatology Clinic")));
+        mockMvc.perform(get("/api/doctors").param("clinicId", String.valueOf(clinic)).header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1)).andExpect(jsonPath("$.content[0].id").value(doctor));
+        mockMvc.perform(post("/api/doctors").header("Authorization", admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"firstName\":\"B\",\"lastName\":\"C\",\"licenseNumber\":\"CL-DOC-2\","
+                                + "\"specialtyId\":%d,\"clinicId\":999999}".formatted(specialty)))
+                .andExpect(status().isNotFound());
+
+        // stays are found by clinic (current bed, or last bed once discharged); occupied structure cannot be closed
+        long patient = createPatient(admin, "CL000000001");
+        long stay = idOf(admit(admin, patient, doctor, bed).andExpect(status().isCreated())
+                .andExpect(jsonPath("$.currentBed.clinicName").value("Dermatology Clinic")));
+        mockMvc.perform(get("/api/hospitalizations").param("clinicId", String.valueOf(clinic)).param("status", "ADMITTED")
+                        .header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1)).andExpect(jsonPath("$.content[0].id").value(stay));
+        mockMvc.perform(patch("/api/clinics/" + clinic + "/deactivate").header("Authorization", admin))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(put("/api/wards/" + wing).header("Authorization", admin).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"clinicId\":%d,\"name\":\"Moved Wing\"}".formatted(clinicId("Cardiology"))))
+                .andExpect(status().isBadRequest());                                    // occupied: cannot move
+        mockMvc.perform(post("/api/hospitalizations/" + stay + "/discharge").header("Authorization", admin)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"dischargeNotes\":\"Recovered\"}"))
+                .andExpect(status().isOk());
+        mockMvc.perform(get("/api/hospitalizations").param("clinicId", String.valueOf(clinic)).param("status", "DISCHARGED")
+                        .header("Authorization", nurse))
+                .andExpect(jsonPath("$.totalElements").value(1));
+
+        // once empty the clinic can be deactivated; new wards cannot be added to it any more
+        mockMvc.perform(patch("/api/clinics/" + clinic + "/deactivate").header("Authorization", admin))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.active").value(false));
+        mockMvc.perform(post("/api/wards").header("Authorization", admin).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clinicId\":%d,\"name\":\"South Wing\"}".formatted(clinic))).andExpect(status().isBadRequest());
+        mockMvc.perform(get("/api/clinics").header("Authorization", nurse))
+                .andExpect(jsonPath("$[?(@.name=='Dermatology Clinic')]").isEmpty());
+        mockMvc.perform(get("/api/clinics").param("active", "false").header("Authorization", nurse))
+                .andExpect(jsonPath("$[?(@.name=='Dermatology Clinic')]").isNotEmpty());
+        mockMvc.perform(delete("/api/clinics/" + clinic).header("Authorization", admin)).andExpect(status().is4xxClientError());
     }
 
     // ---- billing -------------------------------------------------------------------------------
@@ -1347,8 +1438,28 @@ class HisApplicationIntegrationTest {
 
     // ---- helpers for the hospitalization tests -------------------------------------------------
 
-    private long wardId(String name) {
-        return jdbc.queryForObject("SELECT id FROM wards WHERE name = ?", Long.class, name);
+    /** The starter ward ("Main Wing") of the seeded clinic with this name. */
+    private long wardId(String clinicName) {
+        return jdbc.queryForObject("SELECT w.id FROM wards w JOIN clinics c ON c.id = w.clinic_id "
+                + "WHERE c.name = ? AND w.name = 'Main Wing'", Long.class, clinicName);
+    }
+
+    private long clinicId(String name) {
+        return jdbc.queryForObject("SELECT id FROM clinics WHERE name = ?", Long.class, name);
+    }
+
+    private long createClinic(String auth, String name, Long specialtyId) throws Exception {
+        return idOf(mockMvc.perform(post("/api/clinics").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"name\":\"%s\",\"specialtyId\":%s}".formatted(name, specialtyId)))
+                .andExpect(status().isCreated()));
+    }
+
+    private long createWard(String auth, long clinicId, String name) throws Exception {
+        return idOf(mockMvc.perform(post("/api/wards").header("Authorization", auth)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("{\"clinicId\":%d,\"name\":\"%s\"}".formatted(clinicId, name)))
+                .andExpect(status().isCreated()));
     }
 
     private long createRoom(String auth, long wardId, String number) throws Exception {

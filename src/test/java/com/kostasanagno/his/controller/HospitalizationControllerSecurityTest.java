@@ -68,7 +68,7 @@ class HospitalizationControllerSecurityTest {
 
     private static HospitalizationResponse hospitalization() {
         return new HospitalizationResponse(1L, new PatientSummary(1L, "Maria Papadopoulou"),
-                new DoctorSummary(2L, "Gregory House", "Cardiology"), new BedSummary(3L, "A", "101", "Cardiology"),
+                new DoctorSummary(2L, "Gregory House", "Cardiology"), new BedSummary(3L, "A", "101", "Main Wing", "Cardiology"),
                 null, HospitalizationStatus.ADMITTED, Instant.parse("2030-01-01T00:00:00Z"), null, "Chest pain",
                 "Angina", null, Instant.now(), Instant.now());
     }
@@ -77,7 +77,7 @@ class HospitalizationControllerSecurityTest {
         when(hospitalizationService.admit(any(), any())).thenReturn(hospitalization());
         when(hospitalizationService.getById(eq(1L), any())).thenReturn(hospitalization());
         when(hospitalizationService.getBedHistory(eq(1L), any())).thenReturn(List.of(
-                new BedAssignmentResponse(1L, new BedSummary(3L, "A", "101", "Cardiology"),
+                new BedAssignmentResponse(1L, new BedSummary(3L, "A", "101", "Main Wing", "Cardiology"),
                         Instant.parse("2030-01-01T00:00:00Z"), null, null)));
         when(hospitalizationService.search(any(), any(), any()))
                 .thenReturn(new PageImpl<>(List.of(hospitalization()), PageRequest.of(0, 20), 1));
@@ -113,7 +113,8 @@ class HospitalizationControllerSecurityTest {
         mockMvc.perform(post("/api/hospitalizations").with(auth).contentType(MediaType.APPLICATION_JSON)
                         .content(ADMIT_JSON))
                 .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.currentBed.wardName").value("Cardiology"));
+                .andExpect(jsonPath("$.currentBed.wardName").value("Main Wing"))
+                .andExpect(jsonPath("$.currentBed.clinicName").value("Cardiology"));
         mockMvc.perform(get("/api/hospitalizations/1").with(auth)).andExpect(status().isOk());
         mockMvc.perform(get("/api/hospitalizations/1/bed-history").with(auth))
                 .andExpect(status().isOk()).andExpect(jsonPath("$[0].bed.bedNumber").value("A"));

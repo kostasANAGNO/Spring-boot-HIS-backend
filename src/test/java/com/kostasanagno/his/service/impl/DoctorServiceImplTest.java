@@ -10,6 +10,7 @@ import static org.mockito.Mockito.when;
 import com.kostasanagno.his.dto.DoctorRequest;
 import com.kostasanagno.his.dto.DoctorResponse;
 import com.kostasanagno.his.dto.DoctorSearchCriteria;
+import com.kostasanagno.his.entity.Clinic;
 import com.kostasanagno.his.entity.Doctor;
 import com.kostasanagno.his.entity.Role;
 import com.kostasanagno.his.entity.Specialty;
@@ -20,6 +21,7 @@ import com.kostasanagno.his.exception.ResourceNotFoundException;
 import com.kostasanagno.his.mapper.DoctorMapper;
 import com.kostasanagno.his.mapper.DoctorMapperImpl;
 import com.kostasanagno.his.mapper.SpecialtyMapperImpl;
+import com.kostasanagno.his.repository.ClinicRepository;
 import com.kostasanagno.his.repository.DoctorRepository;
 import com.kostasanagno.his.repository.SpecialtyRepository;
 import com.kostasanagno.his.repository.UserRepository;
@@ -48,6 +50,8 @@ class DoctorServiceImplTest {
     private SpecialtyRepository specialtyRepository;
     @Mock
     private UserRepository userRepository;
+    @Mock
+    private ClinicRepository clinicRepository;
 
     private DoctorMapper doctorMapper;
 
@@ -67,7 +71,7 @@ class DoctorServiceImplTest {
 
     private static DoctorRequest request(Long specialtyId, Long userId) {
         return new DoctorRequest("Gregory", "House", " MD-1001 ", specialtyId, "+30 210 1234567",
-                "house@his.local", userId);
+                "house@his.local", userId, null);
     }
 
     private static User user(Long id, Role... roles) {
@@ -154,6 +158,35 @@ class DoctorServiceImplTest {
     }
 
     @Test
+    void createLinksAnActiveClinic() {
+        Clinic clinic = Clinic.builder().name("Cardiology").build();
+        clinic.setId(4L);
+        when(doctorRepository.existsByLicenseNumber("MD-1001")).thenReturn(false);
+        when(specialtyRepository.findById(1L)).thenReturn(Optional.of(cardiology));
+        when(clinicRepository.findById(4L)).thenReturn(Optional.of(clinic));
+        when(doctorRepository.save(any(Doctor.class))).thenAnswer(inv -> inv.getArgument(0));
+
+        DoctorResponse response = service.create(new DoctorRequest("Gregory", "House", "MD-1001", 1L, null, null, null, 4L));
+
+        assertThat(response.clinic().name()).isEqualTo("Cardiology");
+    }
+
+    @Test
+    void createRejectsUnknownAndInactiveClinics() {
+        when(specialtyRepository.findById(1L)).thenReturn(Optional.of(cardiology));
+        when(clinicRepository.findById(9L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.create(new DoctorRequest("G", "H", "MD-1001", 1L, null, null, null, 9L)))
+                .isInstanceOf(ResourceNotFoundException.class).hasMessageContaining("Clinic");
+
+        Clinic closed = Clinic.builder().name("Closed").active(false).build();
+        closed.setId(5L);
+        when(clinicRepository.findById(5L)).thenReturn(Optional.of(closed));
+        assertThatThrownBy(() -> service.create(new DoctorRequest("G", "H", "MD-1001", 1L, null, null, null, 5L)))
+                .isInstanceOf(BusinessRuleException.class).hasMessageContaining("inactive");
+        verify(doctorRepository, never()).save(any());
+    }
+
+    @Test
     void getByIdThrowsWhenMissingOrSoftDeleted() {
         when(doctorRepository.findByIdAndActiveTrue(9L)).thenReturn(Optional.empty());
 
@@ -226,7 +259,7 @@ class DoctorServiceImplTest {
         when(doctorRepository.findAll(any(Specification.class), any(Pageable.class)))
                 .thenReturn(new PageImpl<>(List.of(doctor), pageable, 1));
 
-        Page<DoctorResponse> page = service.search(new DoctorSearchCriteria("A", null, 1L, null), pageable);
+        Page<DoctorResponse> page = service.search(new DoctorSearchCriteria("A", null, 1L, null, null), pageable);
 
         assertThat(page.getTotalElements()).isEqualTo(1);
         assertThat(page.getContent().get(0).specialty().id()).isEqualTo(1L);

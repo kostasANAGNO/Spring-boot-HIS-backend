@@ -14,6 +14,7 @@ import com.kostasanagno.his.dto.RoomResponse;
 import com.kostasanagno.his.dto.WardRequest;
 import com.kostasanagno.his.dto.WardResponse;
 import com.kostasanagno.his.entity.Bed;
+import com.kostasanagno.his.entity.Clinic;
 import com.kostasanagno.his.entity.Room;
 import com.kostasanagno.his.entity.Ward;
 import com.kostasanagno.his.exception.BusinessRuleException;
@@ -24,6 +25,7 @@ import com.kostasanagno.his.mapper.RoomMapperImpl;
 import com.kostasanagno.his.mapper.WardMapperImpl;
 import com.kostasanagno.his.repository.BedAssignmentRepository;
 import com.kostasanagno.his.repository.BedRepository;
+import com.kostasanagno.his.repository.ClinicRepository;
 import com.kostasanagno.his.repository.RoomRepository;
 import com.kostasanagno.his.repository.WardRepository;
 import java.util.Optional;
@@ -40,6 +42,8 @@ class StructureServicesTest {
     @Mock
     private WardRepository wardRepository;
     @Mock
+    private ClinicRepository clinicRepository;
+    @Mock
     private RoomRepository roomRepository;
     @Mock
     private BedRepository bedRepository;
@@ -49,16 +53,20 @@ class StructureServicesTest {
     private WardServiceImpl wardService;
     private RoomServiceImpl roomService;
     private BedServiceImpl bedService;
+    private Clinic clinic;
     private Ward ward;
     private Room room;
     private Bed bed;
 
     @BeforeEach
     void setUp() {
-        wardService = new WardServiceImpl(wardRepository, bedAssignmentRepository, new WardMapperImpl());
+        wardService = new WardServiceImpl(wardRepository, clinicRepository, bedAssignmentRepository,
+                new WardMapperImpl());
         roomService = new RoomServiceImpl(roomRepository, wardRepository, bedAssignmentRepository, new RoomMapperImpl());
         bedService = new BedServiceImpl(bedRepository, roomRepository, bedAssignmentRepository, new BedMapperImpl());
-        ward = Ward.builder().name("Cardiology").build();
+        clinic = Clinic.builder().name("Cardiology").build();
+        clinic.setId(4L);
+        ward = Ward.builder().clinic(clinic).name("Main Wing").build();
         ward.setId(1L);
         room = Room.builder().ward(ward).roomNumber("101").build();
         room.setId(2L);
@@ -69,23 +77,59 @@ class StructureServicesTest {
     // ---- wards ---------------------------------------------------------------------------------
 
     @Test
-    void wardIsCreatedWithTrimmedName() {
-        when(wardRepository.existsByNameIgnoreCase("Oncology")).thenReturn(false);
+    void wardIsCreatedInAnActiveClinicWithTrimmedName() {
+        when(clinicRepository.findById(4L)).thenReturn(Optional.of(clinic));
         when(wardRepository.save(any(Ward.class))).thenAnswer(inv -> inv.getArgument(0));
 
-        WardResponse response = wardService.create(new WardRequest(" Oncology "));
+        WardResponse response = wardService.create(new WardRequest(4L, " North Wing "));
 
-        assertThat(response.name()).isEqualTo("Oncology");
+        assertThat(response.name()).isEqualTo("North Wing");
+        assertThat(response.clinicId()).isEqualTo(4L);
+        assertThat(response.clinicName()).isEqualTo("Cardiology");
         assertThat(response.active()).isTrue();
     }
 
     @Test
-    void duplicateWardNameIsRejected() {
-        when(wardRepository.existsByNameIgnoreCase("Cardiology")).thenReturn(true);
+    void duplicateWardNameInTheSameClinicIsRejected() {
+        when(clinicRepository.findById(4L)).thenReturn(Optional.of(clinic));
+        when(wardRepository.existsByClinicIdAndNameIgnoreCase(4L, "Main Wing")).thenReturn(true);
 
-        assertThatThrownBy(() -> wardService.create(new WardRequest("Cardiology")))
+        assertThatThrownBy(() -> wardService.create(new WardRequest(4L, "Main Wing")))
                 .isInstanceOf(DuplicateResourceException.class);
         verify(wardRepository, never()).save(any());
+    }
+
+    @Test
+    void wardRejectsMissingOrInactiveClinic() {
+        when(clinicRepository.findById(9L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> wardService.create(new WardRequest(9L, "X")))
+                .isInstanceOf(ResourceNotFoundException.class).hasMessageContaining("Clinic");
+
+        clinic.setActive(false);
+        when(clinicRepository.findById(4L)).thenReturn(Optional.of(clinic));
+        assertThatThrownBy(() -> wardService.create(new WardRequest(4L, "X"))).isInstanceOf(BusinessRuleException.class);
+    }
+
+    @Test
+    void occupiedWardCannotMoveToAnotherClinic() {
+        when(wardRepository.findById(1L)).thenReturn(Optional.of(ward));
+        when(bedAssignmentRepository.existsByBedRoomWardIdAndEndTimeIsNull(1L)).thenReturn(true);
+
+        assertThatThrownBy(() -> wardService.update(1L, new WardRequest(5L, "Main Wing")))
+                .isInstanceOf(BusinessRuleException.class).hasMessageContaining("moved");
+    }
+
+    @Test
+    void freeWardMovesToAnotherActiveClinic() {
+        Clinic other = Clinic.builder().name("Surgery").build();
+        other.setId(5L);
+        when(wardRepository.findById(1L)).thenReturn(Optional.of(ward));
+        when(clinicRepository.findById(5L)).thenReturn(Optional.of(other));
+        when(wardRepository.saveAndFlush(ward)).thenReturn(ward);
+
+        WardResponse response = wardService.update(1L, new WardRequest(5L, "Main Wing"));
+
+        assertThat(response.clinicName()).isEqualTo("Surgery");
     }
 
     @Test
@@ -122,7 +166,8 @@ class StructureServicesTest {
         RoomResponse response = roomService.create(new RoomRequest(1L, " 102 "));
 
         assertThat(response.roomNumber()).isEqualTo("102");
-        assertThat(response.wardName()).isEqualTo("Cardiology");
+        assertThat(response.wardName()).isEqualTo("Main Wing");
+        assertThat(response.clinicName()).isEqualTo("Cardiology");
     }
 
     @Test
@@ -175,7 +220,8 @@ class StructureServicesTest {
 
         assertThat(response.bedNumber()).isEqualTo("B");
         assertThat(response.roomNumber()).isEqualTo("101");
-        assertThat(response.wardName()).isEqualTo("Cardiology");
+        assertThat(response.wardName()).isEqualTo("Main Wing");
+        assertThat(response.clinicName()).isEqualTo("Cardiology");
         assertThat(response.occupied()).isFalse();
     }
 

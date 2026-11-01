@@ -11,6 +11,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.kostasanagno.his.config.SecurityConfig;
+import com.kostasanagno.his.dto.ClinicSummary;
 import com.kostasanagno.his.dto.DoctorResponse;
 import com.kostasanagno.his.dto.SpecialtyResponse;
 import com.kostasanagno.his.exception.GlobalExceptionHandler;
@@ -57,7 +58,7 @@ class DoctorControllerSecurityTest {
 
     private static DoctorResponse doctor() {
         return new DoctorResponse(1L, "Gregory", "House", "MD-1001", new SpecialtyResponse(1L, "Cardiology"),
-                null, null, null, true, Instant.now(), Instant.now());
+                new ClinicSummary(1L, "Cardiology"), null, null, null, true, Instant.now(), Instant.now());
     }
 
     @Test

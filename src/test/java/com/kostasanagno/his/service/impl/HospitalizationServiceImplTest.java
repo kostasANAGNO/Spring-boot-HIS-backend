@@ -18,6 +18,7 @@ import com.kostasanagno.his.dto.HospitalizationUpdateRequest;
 import com.kostasanagno.his.dto.TransferRequest;
 import com.kostasanagno.his.entity.Appointment;
 import com.kostasanagno.his.entity.Bed;
+import com.kostasanagno.his.entity.Clinic;
 import com.kostasanagno.his.entity.BedAssignment;
 import com.kostasanagno.his.entity.Doctor;
 import com.kostasanagno.his.entity.Hospitalization;
@@ -106,7 +107,9 @@ class HospitalizationServiceImplTest {
         doctor = Doctor.builder().firstName("Gregory").lastName("House").licenseNumber("MD-1")
                 .specialty(cardiology).build();
         doctor.setId(20L);
-        ward = Ward.builder().name("Cardiology").build();
+        Clinic clinic = Clinic.builder().name("Cardiology").build();
+        clinic.setId(9L);
+        ward = Ward.builder().clinic(clinic).name("Main Wing").build();
         ward.setId(1L);
         room = Room.builder().ward(ward).roomNumber("101").build();
         room.setId(2L);
@@ -185,7 +188,8 @@ class HospitalizationServiceImplTest {
         assertThat(response.attendingDoctor().specialty()).isEqualTo("Cardiology");
         assertThat(response.currentBed().bedNumber()).isEqualTo("A");
         assertThat(response.currentBed().roomNumber()).isEqualTo("101");
-        assertThat(response.currentBed().wardName()).isEqualTo("Cardiology");
+        assertThat(response.currentBed().wardName()).isEqualTo("Main Wing");
+        assertThat(response.currentBed().clinicName()).isEqualTo("Cardiology");
         assertThat(response.diagnosis()).isEqualTo("Suspected angina");
         ArgumentCaptor<BedAssignment> captor = ArgumentCaptor.forClass(BedAssignment.class);
         verify(bedAssignmentRepository).saveAndFlush(captor.capture());
@@ -603,10 +607,10 @@ class HospitalizationServiceImplTest {
                 .thenReturn(List.of(currentAssignment(h)));
 
         Page<HospitalizationResponse> page = service.search(
-                new HospitalizationSearchCriteria(null, null, 1L, null, null, null, null), pageable, nurse);
+                new HospitalizationSearchCriteria(null, null, null, 1L, null, null, null, null), pageable, nurse);
 
         assertThat(page.getContent()).hasSize(1);
-        assertThat(page.getContent().get(0).currentBed().wardName()).isEqualTo("Cardiology");
+        assertThat(page.getContent().get(0).currentBed().wardName()).isEqualTo("Main Wing");
     }
 
     @Test
@@ -617,7 +621,7 @@ class HospitalizationServiceImplTest {
                 .thenReturn(new PageImpl<>(List.of(), pageable, 0));
 
         Page<HospitalizationResponse> page = service.searchForDoctorUser(
-                new HospitalizationSearchCriteria(null, 999L, null, null, null, null, null), pageable,
+                new HospitalizationSearchCriteria(null, 999L, null, null, null, null, null, null), pageable,
                 new Caller("dr.house", Set.of(Role.DOCTOR)));
 
         assertThat(page.getTotalElements()).isZero();
