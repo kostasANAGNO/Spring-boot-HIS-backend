@@ -139,13 +139,20 @@ searches, creates, updates and their actions such as cancel, discharge or amend)
 
 * A response that discloses several records (a search page, `/me`) writes **one event per record**, so
   `GET /api/audit-events?patientId=5` answers "who looked at patient 5". An empty search leaves a single summary event.
-* Filters: `username`, `patientId`, `resourceType` (`PATIENT`, `APPOINTMENT`, `HOSPITALIZATION`, `CLINICAL_NOTE`,
-  `INVOICE`, `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
+* Filters: `username`, `ipAddress`, `patientId`, `resourceType` (`PATIENT`, `APPOINTMENT`, `HOSPITALIZATION`, `CLINICAL_NOTE`,
+  `INVOICE`, `USER`, `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
 * **Privacy:** only ids and request metadata are stored (path without the query string): no names, notes, diagnoses or
   search terms. The table is append-only: the database refuses `UPDATE` and `DELETE`.
 * **No audit, no data:** the event is written before the response is sent. If it cannot be stored, the request fails
   (for writes the change itself is already committed). Refused requests are recorded even though they return 403.
-* Not audited (yet): logins, doctors, wards/rooms/beds, users. The client IP is the direct connection address; behind a
+* **Logins and user creation:** every login attempt is recorded (`action=LOGIN`, `resourceType=USER`): `SUCCESS` with the
+  user's roles, or `DENIED` with a short `detail` code (`BAD_CREDENTIALS`, `ACCOUNT_DISABLED`, `ACCOUNT_LOCKED`, ...).
+  A failed attempt for a name that is **not an account** is stored as username `unknown`, so a password typed into the
+  username field never lands in the log; passwords are never stored. A successful login is written before the token is
+  returned. Creating a user (`POST /api/auth/register`) is recorded too, including refusals for non-admins. Useful
+  queries: `?action=LOGIN&outcome=DENIED` (failed logins), add `&ipAddress=...` to follow one address.
+  Requests that only carry a token are not logins and are not recorded.
+* Not audited (yet): doctors, wards/rooms/beds, the price list. There is no lock-out after repeated failed logins. The client IP is the direct connection address; behind a
   proxy configure `server.forward-headers-strategy` so it reflects the real client.
 
 > **After pulling this change** reset the local DB (`V1` gained the `audit_events` table):

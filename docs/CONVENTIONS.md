@@ -123,6 +123,13 @@ or `*Impl` classes; use `@Slf4j` for logging.
   `PatientIdResolver`.
 * The audit aspect is the OUTERMOST advice (above `@PreAuthorize`), so refused requests are recorded as `DENIED`.
   The event is written in its own transaction (`REQUIRES_NEW`) before the response is returned: "no audit, no data".
+* Things the aspect cannot see need their own listener (package `audit`): logins (nobody is authenticated yet) use
+  Spring Security's authentication events (`AuthenticationAuditListener`), and refusals by the URL rules in
+  `SecurityConfig` (they happen before any controller) use authorization-denied events
+  (`UrlAccessDeniedAuditListener`; add a line there when you add a URL-level role rule). Success is written before the
+  response ("no audit, no login"); for failures/refusals an audit problem is logged, never allowed to change the answer.
+  Never record the typed password or an unknown username (store `unknown`); only requests from logged-in users are
+  recorded for URL refusals, so anonymous traffic cannot fill the table. `detail` holds a short machine code, never text.
 * Store ids and metadata only. Never names, free text, query strings or search terms, and `audit_events` has no
   foreign keys so it outlives any data change. The table is append-only (trigger) and read only by ADMIN.
 
