@@ -5,6 +5,13 @@
 -- needed by the appointment exclusion constraints (equality on ids inside a GiST index)
 CREATE EXTENSION IF NOT EXISTS btree_gist;
 
+-- Shared by every append-only table: the database itself refuses UPDATE/DELETE, whatever the application does.
+CREATE FUNCTION forbid_row_change() RETURNS trigger AS $$
+BEGIN
+    RAISE EXCEPTION '% on % is not allowed (append-only record)', TG_OP, TG_TABLE_NAME;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE TABLE users (
     id         BIGSERIAL PRIMARY KEY,
     username   VARCHAR(50)  NOT NULL,
@@ -192,9 +199,6 @@ CREATE TABLE hospitalizations (
     status              VARCHAR(20)   NOT NULL,
     admission_time      TIMESTAMPTZ   NOT NULL,
     discharge_time      TIMESTAMPTZ,
-    admission_reason    VARCHAR(500)  NOT NULL,
-    diagnosis           VARCHAR(2000),
-    discharge_notes     VARCHAR(2000),
     created_at          TIMESTAMPTZ   NOT NULL,
     updated_at          TIMESTAMPTZ   NOT NULL,
     CONSTRAINT uq_hospitalizations_appointment UNIQUE (appointment_id),
@@ -212,6 +216,91 @@ CREATE INDEX idx_hospitalizations_patient ON hospitalizations (patient_id);
 CREATE INDEX idx_hospitalizations_doctor ON hospitalizations (attending_doctor_id);
 CREATE INDEX idx_hospitalizations_status ON hospitalizations (status);
 CREATE INDEX idx_hospitalizations_admission_time ON hospitalizations (admission_time);
+
+-- ---------------------------------------------------------------------------------------------
+-- The two documents of a stay: the admission record ("eisitirio") is written when the patient is admitted, the
+-- discharge record ("exitirio") when the patient leaves. Each is exactly one row per hospitalization.
+-- The hospitalization row itself only carries the life cycle (status and times).
+-- ---------------------------------------------------------------------------------------------
+CREATE TABLE admission_records (
+    id                     BIGSERIAL PRIMARY KEY,
+    hospitalization_id     BIGINT        NOT NULL REFERENCES hospitalizations (id),
+    admission_type         VARCHAR(20)   NOT NULL,
+    admission_source       VARCHAR(30)   NOT NULL,
+    referring_facility     VARCHAR(150),
+    reason                 VARCHAR(500)  NOT NULL,
+    initial_diagnosis_code VARCHAR(10),
+    initial_diagnosis      VARCHAR(2000),
+    created_at             TIMESTAMPTZ   NOT NULL,
+    updated_at             TIMESTAMPTZ   NOT NULL,
+    CONSTRAINT uq_admission_records_hospitalization UNIQUE (hospitalization_id),
+    CONSTRAINT ck_admission_records_type CHECK (admission_type IN ('ELECTIVE', 'EMERGENCY', 'TRANSFER_IN')),
+    CONSTRAINT ck_admission_records_source CHECK (admission_source IN ('APPOINTMENT', 'EMERGENCY_DEPARTMENT', 'REFERRAL', 'OTHER')),
+    CONSTRAINT ck_admission_records_transfer_in_facility CHECK (admission_type <> 'TRANSFER_IN' OR referring_facility IS NOT NULL)
+);
+
+CREATE TABLE discharge_records (
+    id                    BIGSERIAL PRIMARY KEY,
+    hospitalization_id    BIGINT        NOT NULL REFERENCES hospitalizations (id),
+    discharge_type        VARCHAR(30)   NOT NULL,
+    destination_facility  VARCHAR(150),
+    final_diagnosis_code  VARCHAR(10),
+    final_diagnosis       VARCHAR(2000),
+    summary               VARCHAR(2000) NOT NULL,
+    instructions          VARCHAR(2000),
+    follow_up_date        DATE,
+    created_at            TIMESTAMPTZ   NOT NULL,
+    updated_at            TIMESTAMPTZ   NOT NULL,
+    CONSTRAINT uq_discharge_records_hospitalization UNIQUE (hospitalization_id),
+    CONSTRAINT ck_discharge_records_type CHECK (discharge_type IN ('HOME', 'TRANSFER_OUT', 'AGAINST_MEDICAL_ADVICE', 'DECEASED')),
+    CONSTRAINT ck_discharge_records_destination CHECK ((discharge_type = 'TRANSFER_OUT') = (destination_facility IS NOT NULL)),
+    CONSTRAINT ck_discharge_records_deceased_follow_up CHECK (discharge_type <> 'DECEASED' OR follow_up_date IS NULL)
+);
+
+-- A discharge record is final: it is never changed or removed.
+CREATE TRIGGER trg_discharge_records_append_only
+    BEFORE UPDATE OR DELETE ON discharge_records
+    FOR EACH ROW EXECUTE FUNCTION forbid_row_change();
+
+-- An admission record can be corrected while the patient is still admitted; after the discharge it is frozen.
+CREATE FUNCTION guard_admission_record() RETURNS trigger AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'DELETE on admission_records is not allowed (append-only record)';
+    END IF;
+    IF NEW.hospitalization_id <> OLD.hospitalization_id THEN
+        RAISE EXCEPTION 'an admission record cannot move to another hospitalization';
+    END IF;
+    IF (SELECT status FROM hospitalizations WHERE id = OLD.hospitalization_id) = 'DISCHARGED' THEN
+        RAISE EXCEPTION 'the admission record of a discharged hospitalization cannot be changed';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_admission_records_guard
+    BEFORE UPDATE OR DELETE ON admission_records
+    FOR EACH ROW EXECUTE FUNCTION guard_admission_record();
+
+-- Every hospitalization has its admission record, and a discharged one also its discharge record. Checked when the
+-- transaction commits, so both rows can be written in the same transaction as the hospitalization.
+CREATE FUNCTION check_hospitalization_documents() RETURNS trigger AS $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM admission_records WHERE hospitalization_id = NEW.id) THEN
+        RAISE EXCEPTION 'hospitalization % has no admission record', NEW.id;
+    END IF;
+    IF NEW.status = 'DISCHARGED'
+            AND NOT EXISTS (SELECT 1 FROM discharge_records WHERE hospitalization_id = NEW.id) THEN
+        RAISE EXCEPTION 'discharged hospitalization % has no discharge record', NEW.id;
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE CONSTRAINT TRIGGER trg_hospitalizations_documents
+    AFTER INSERT OR UPDATE ON hospitalizations
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION check_hospitalization_documents();
 
 CREATE TABLE bed_assignments (
     id                 BIGSERIAL PRIMARY KEY,
@@ -278,12 +367,6 @@ CREATE INDEX idx_clinical_note_versions_diagnosis ON clinical_note_versions (dia
 
 -- Medical history is never rewritten or removed: the database itself refuses UPDATE/DELETE on versions
 -- and DELETE on notes, whatever the application does.
-CREATE FUNCTION forbid_row_change() RETURNS trigger AS $$
-BEGIN
-    RAISE EXCEPTION '% on % is not allowed (append-only record)', TG_OP, TG_TABLE_NAME;
-END;
-$$ LANGUAGE plpgsql;
-
 CREATE TRIGGER trg_clinical_note_versions_append_only
     BEFORE UPDATE OR DELETE ON clinical_note_versions
     FOR EACH ROW EXECUTE FUNCTION forbid_row_change();

@@ -17,7 +17,10 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
 
-/** Never deleted. {@code diagnosis} and {@code dischargeNotes} are clinical data: never log or print them. */
+/**
+ * The life cycle of a stay (patient, doctor, status, times). What was said at the start and the end lives in
+ * {@link AdmissionRecord} and {@link DischargeRecord}. Never deleted.
+ */
 @Entity
 @Table(name = "hospitalizations")
 @Getter
@@ -54,12 +57,4 @@ public class Hospitalization extends BaseEntity {
     @Column(name = "discharge_time")
     private Instant dischargeTime;
 
-    @Column(name = "admission_reason", nullable = false, length = 500)
-    private String admissionReason;
-
-    @Column(length = 2000)
-    private String diagnosis;
-
-    @Column(name = "discharge_notes", length = 2000)
-    private String dischargeNotes;
 }
