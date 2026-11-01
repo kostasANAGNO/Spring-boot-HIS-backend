@@ -99,6 +99,27 @@ or `*Impl` classes; use `@Slf4j` for logging.
   instead of being redacted. Authorship comes from the doctor profile linked to the logged-in user, never from a
   request field. Never log or `toString` the content.
 
+## Medication (orders, dispensing, administration)
+
+* A request -> fulfilment -> bedside chain is modelled as three things: a mutable-by-status **order**, append-only
+  **dispensings** and append-only **administrations**. The order's fields never change (the database refuses it);
+  only `status` and the `closed*` fields move, forward only (`MedicationOrderStatus.canTransitionTo`, mirrored by
+  `guard_medication_order`). A mistake is corrected by stopping the order and writing a new one.
+* Every operation that changes an order, or adds a dispensing/administration to it, loads it with
+  `findByIdForUpdate` first (row lock). That serializes races (two nurses, a dispensing vs a discharge); rules that
+  depend on earlier rows (the minimum interval between doses) are then safe to check in the service. Database triggers
+  repeat the important ones (cannot administer unless DISPENSED, cannot dispense a closed order).
+* Safety rules are small private methods in the service (`doseGiven`, `assertDoseSpacing`, ...); tunable values (the
+  early tolerance) live in a `@ConfigurationProperties` record (`MedicationProperties`).
+* Roles are per action, not per module: `PHARMACY_STAFF` (dispense/reject, maintain catalog),
+  `ADMINISTER_MEDICATION` (DOCTOR, NURSE), `MEDICATION_STAFF` (read). A role that only needs a slice of the data gets
+  its own constants instead of joining `ANY_STAFF`; the response carries what that role needs (patient name and bed), so
+  it needs no other endpoint. A rule that depends on a data flag (controlled substances) is checked in the service with
+  the `Caller`.
+* **Reacting to another module's step:** when a step in module A must trigger work in module B (discharge closes open
+  orders), A publishes a small event (`HospitalizationDischargedEvent`) inside its transaction and B listens
+  synchronously (`MedicationDischargeListener`); A never depends on B. Both succeed or fail together.
+
 ## Money and billing
 
 * Amounts are `BigDecimal` with exactly 2 decimals in the single currency (EUR), `NUMERIC(12,2)` in the database,

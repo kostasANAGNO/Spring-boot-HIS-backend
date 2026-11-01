@@ -126,6 +126,51 @@ Appointments cannot be deleted; cancelling keeps the history.
 > **After pulling this change** reset the local DB (`V1` gained the billing tables, triggers and the invoice number
 > sequence): `docker compose down -v && docker compose up -d --wait`
 
+| Medication endpoint | Roles |
+|---|---|
+| `GET /api/medications[/{id}]` (catalog) | ADMIN, DOCTOR, NURSE, PHARMACIST |
+| `POST/PUT /api/medications`, `PATCH /api/medications/{id}/deactivate` | ADMIN, PHARMACIST |
+| `POST /api/medication-orders` (order) | DOCTOR |
+| `GET /api/medication-orders[/{id}]`, `.../{id}/dispensings`, `.../{id}/administrations`, `GET /api/medication-administrations` | ADMIN, DOCTOR, NURSE, PHARMACIST |
+| `GET /api/medication-orders/me` (orders I wrote) | DOCTOR |
+| `POST /api/medication-orders/{id}/dispense`, `.../reject` | ADMIN, PHARMACIST (controlled medication: PHARMACIST only) |
+| `POST /api/medication-orders/{id}/cancel`, `.../stop` | ADMIN, DOCTOR |
+| `POST /api/medication-orders/{id}/administrations` | DOCTOR, NURSE |
+
+Receptionists have no access to medication at all. Pharmacists only see medication (no patients, invoices, notes or
+diagnoses); an order carries the patient's name and bed so the pharmacy knows where to send it.
+
+### Medication
+
+Only for **hospitalized patients**: ordering, dispensing and giving all require an `ADMITTED` hospitalization. The
+new role **`PHARMACIST`** is created through `POST /api/auth/register` like the others.
+
+* **Flow:** a DOCTOR writes an **order** (`PENDING`) -> the pharmacy **dispenses** it (`DISPENSED`; further supplies are
+  allowed) or **rejects** it with a reason (`REJECTED`) -> a nurse (or doctor) records every **administration** (`GIVEN`,
+  `REFUSED` or `HELD`). A doctor/admin can **cancel** a `PENDING` order or **stop** a `DISPENSED` one (`CANCELLED`/`STOPPED`,
+  with a reason). A `ONCE` order becomes `COMPLETED` by its dose. All of these are final states.
+* **The order:** medication from the catalog, dose (`doseAmount` + `doseUnit`), `route` (`ORAL`, `INTRAVENOUS`, ...),
+  `scheduleType`: `ONCE`, `SCHEDULED` (every `intervalHours` hours) or `AS_NEEDED` (at least `intervalHours` hours apart),
+  `startTime` (default now, not before the admission) and optional `endTime`. **Orders are never edited**: stop it and
+  write a new one. Nothing is ever deleted.
+* **Safety rules at the bedside:** only a `DISPENSED` order can be administered; a dose given can never exceed the
+  ordered dose; the time cannot be in the future, before the order started or after it ended; and a repeat dose must keep
+  the interval (minus `app.medication.early-tolerance`, default 30 minutes) after the last dose given, otherwise it is
+  refused as a possible double dose. Two nurses recording the same dose at once: only one succeeds (the order row is
+  locked while it changes).
+* **Controlled substances** (`controlled=true` in the catalog, e.g. morphine) can only be dispensed by a `PHARMACIST`.
+* **When the patient is discharged** the still open orders are closed automatically: `PENDING` -> `CANCELLED`, `DISPENSED`
+  -> `STOPPED`, reason "The patient was discharged".
+* The seeded catalog (paracetamol, ibuprofen, amoxicillin, omeprazole, insulin, heparin, sodium chloride, morphine) is
+  **starter data to verify** before real use. There is no stock keeping, and no allergy or interaction checking yet.
+* **Database protection:** orders cannot be edited or deleted and their status only moves forward along the allowed path;
+  dispensings and administrations are append-only; nothing can be administered unless the order is `DISPENSED`.
+  Medication activity is part of the audit log (`MEDICATION_ORDER`: `CREATE`, `DISPENSE`, `REJECT`, `CANCEL`, `STOP`,
+  `ADMINISTER`, `VIEW`).
+
+> **After pulling this change** reset the local DB (`V1` gained the medication tables and the `PHARMACIST` role):
+> `docker compose down -v && docker compose up -d --wait`
+
 | Audit log endpoint | Roles |
 |---|---|
 | `GET /api/audit-events` | ADMIN (read-only; nothing can change or delete events) |
@@ -134,13 +179,13 @@ Appointments cannot be deleted; cancelling keeps the history.
 
 Every access to or change of patient-related data is recorded: **who** (username, roles), **what** (action and record),
 **which patient**, **when**, from which IP, and the **outcome** (`SUCCESS`, `DENIED` when the role was not allowed,
-`FAILED` for e.g. a missing record). It covers patients, appointments, hospitalizations, clinical notes and invoices (reads,
+`FAILED` for e.g. a missing record). It covers patients, appointments, hospitalizations, clinical notes, invoices and medication orders (reads,
 searches, creates, updates and their actions such as cancel, discharge or amend) and the reading of the audit log itself.
 
 * A response that discloses several records (a search page, `/me`) writes **one event per record**, so
   `GET /api/audit-events?patientId=5` answers "who looked at patient 5". An empty search leaves a single summary event.
 * Filters: `username`, `ipAddress`, `patientId`, `resourceType` (`PATIENT`, `APPOINTMENT`, `HOSPITALIZATION`, `CLINICAL_NOTE`,
-  `INVOICE`, `USER`, `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
+  `INVOICE`, `MEDICATION_ORDER`, `USER`, `AUDIT_LOG`), `resourceId`, `action`, `outcome`, `from`, `to`. Newest first.
 * **Privacy:** only ids and request metadata are stored (path without the query string): no names, notes, diagnoses or
   search terms. The table is append-only: the database refuses `UPDATE` and `DELETE`.
 * **No audit, no data:** the event is written before the response is sent. If it cannot be stored, the request fails
