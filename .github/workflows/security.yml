@@ -1,0 +1,51 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1"   # every Monday: new vulnerabilities are published without anybody pushing code
+
+permissions:
+  contents: read
+
+jobs:
+  # Static analysis of the Java code. The `if` keeps the job from failing on private repositories without GitHub
+  # Advanced Security: remove the condition if you have it. Dependabot (see dependabot.yml) is free either way.
+  codeql:
+    name: CodeQL
+    if: ${{ !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: java-kotlin
+          build-mode: manual
+      - name: Compile
+        run: ./mvnw -B -DskipTests package
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:java-kotlin"
+
+  # Blocks a pull request that introduces a dependency with a known high or critical vulnerability.
+  dependency-review:
+    name: Dependency review
+    if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high

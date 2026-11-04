@@ -1,0 +1,14 @@
+# keep the build context small and free of local files and secrets
+.git
+.github
+.idea
+.vscode
+target
+**/*.iml
+.env
+.env.*
+*.log
+docker-compose*.yml
+CLAUDE.md
+README.md
+docs

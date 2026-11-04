@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# a newer push to the same branch/PR makes the older run pointless
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, test and coverage
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Unit tests, architecture rules (ArchUnit), security matrices and the Testcontainers integration test
+      # (the runner has Docker). Fails below the JaCoCo coverage floor configured in the pom.
+      - name: Verify
+        run: ./mvnw -B verify
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import csv, os
+          path = "target/site/jacoco/jacoco.csv"
+          if not os.path.exists(path):
+              print("No coverage report was produced.")
+          else:
+              rows = list(csv.DictReader(open(path)))
+              print("### Coverage\n\n| | covered | total | % |\n|---|---:|---:|---:|")
+              for key in ("LINE", "BRANCH", "METHOD"):
+                  covered = sum(int(r[key + "_COVERED"]) for r in rows)
+                  missed = sum(int(r[key + "_MISSED"]) for r in rows)
+                  total = covered + missed
+                  print(f"| {key.title()} | {covered} | {total} | {100 * covered / total:.1f} |")
+          PY
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: target/surefire-reports
+          retention-days: 7
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/site/jacoco
+          retention-days: 7
+
+  image:
+    name: Container image smoke test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Builds the image from the Dockerfile and starts the whole system (application + PostgreSQL) exactly as
+      # `docker compose --profile app up` does for a developer, then checks it really works.
+      - name: Start the system
+        env:
+          JWT_SECRET: ci-only-signing-key-generated-per-run-${{ github.run_id }}-${{ github.run_attempt }}
+        run: docker compose --profile app up --build -d --wait
+
+      - name: Smoke test
+        run: |
+          set -e
+          curl -fsS http://localhost:8080/actuator/health | grep -q '"status":"UP"'
+          # the seeded development admin can log in
+          curl -fsS -X POST http://localhost:8080/api/auth/login -H 'Content-Type: application/json' \
+            -d '{"username":"admin","password":"Admin123!"}' | grep -q accessToken
+          # nothing but the health probes of the actuator is reachable, and Swagger is off
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/actuator/env)" = 401
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/swagger-ui.html)" = 404
+          # the container does not run as root
+          test "$(docker exec his-app id -u)" != 0
+
+      - name: Show the logs if something failed
+        if: failure()
+        run: docker compose --profile app logs --no-color
+
+      - name: Stop the system
+        if: always()
+        run: docker compose --profile app down -v

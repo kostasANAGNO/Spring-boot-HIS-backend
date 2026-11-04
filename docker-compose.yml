@@ -1,4 +1,8 @@
-# Local development database. Reset it (and re-run the Flyway baseline) with: docker compose down -v
+# Local development.
+#   docker compose up -d --wait            -> only the PostgreSQL database (run the app from your IDE / mvnw)
+#   JWT_SECRET=... docker compose --profile app up --build -d --wait
+#                                          -> the database AND the application as a container on :8080
+# Reset the database (and re-run the Flyway baseline) with: docker compose down -v
 services:
   postgres:
     image: postgres:16-alpine
@@ -16,6 +20,25 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # The whole system in containers. Not started by default (profile "app").
+  app:
+    profiles: ["app"]
+    build: .
+    image: his-backend:local
+    container_name: his-app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-his}
+      DB_USERNAME: ${POSTGRES_USER:-his}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-his}
+      # no default on purpose: a signing key must never be committed. Generate one with: openssl rand -base64 48
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET (at least 32 characters), e.g. JWT_SECRET=$(openssl rand -base64 48)}
+    ports:
+      - "8080:8080"
+    # the image defines the health check (readiness probe); compose waits for it with --wait
 
 volumes:
   his-pgdata:
