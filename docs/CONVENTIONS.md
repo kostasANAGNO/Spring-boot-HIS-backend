@@ -3,6 +3,31 @@
 Spring Boot 3.5 / Java 21 / Maven / PostgreSQL. Base package `com.kostasanagno.his`. The **Patient** module is the
 reference implementation: when adding Doctor, Appointment, ... copy its structure file by file.
 
+## Architecture rules are enforced, not just described
+
+The conventions in this file that can be checked by a machine ARE checked: `HisArchRules` (ArchUnit, runs in
+`./mvnw verify` and in CI) fails the build on, among others:
+
+* layering: controllers depend on service interfaces only (no repositories, no `*Impl`); services do not know controllers;
+  repositories, DTOs, mappers, entities and exceptions do not know the layers above them; entities only depend on
+  persistence classes;
+* controllers: nothing public takes or returns an entity; every endpoint has `@PreAuthorize` (only `POST /api/auth/login`
+  is open); every endpoint on patient data has `@Audited`; `@RestController` is named `*Controller`, lives in `controller`
+  and is mapped under `/api/`; no `@Transactional`;
+* beans: no field injection (`@Autowired`, `@Value`: use constructor injection and a `@ConfigurationProperties`
+  record), services/controllers/components hold no mutable state;
+* services: implementations are `@Service` + class-level `@Transactional` and implement an interface from `service`
+  (`AuthServiceImpl` is the one deliberate exception: `Propagation.NOT_SUPPORTED`, written down in the class);
+* data: DTOs are records, entities extend `IdentifiedEntity` (safe equals/hashCode), to-one associations are `LAZY`,
+  mappers use `@Mapper(config = CentralMapperConfig.class)`, repositories are interfaces named `*Repository`;
+* hygiene: no `System.out`/`err`, no `java.util.logging`, no throwing `RuntimeException`/`Exception` directly.
+
+When a rule fails, fix the code. If the rule is wrong for a good reason, change it in `HisArchRules` AND here in the same
+commit. Two lists are meant to be edited on purpose: `CONTROLLERS_WITHOUT_PATIENT_DATA` (a NEW controller either audits
+its endpoints or is added there deliberately) and the login exception. Every rule must be demonstrably able to fail:
+`ArchitectureRulesBiteTest` runs all rules against the sample classes in `src/test/java/com/example/archfixtures`, so
+when you add a rule, add a sample that violates it.
+
 ## Layers (package `com.kostasanagno.his.`)
 
 | Package | Content |
@@ -214,6 +239,16 @@ turns everything into `ApiError`; security 401/403 use the same shape. A new exc
 
 `./mvnw clean verify` must pass (Docker needed for Testcontainers). Per module: service unit tests (Mockito), cases in
 `ControllerSecurityTest` style (`@WebMvcTest` + imported `SecurityConfig`), and extend the Testcontainers integration test.
+
+## Build, containers and CI
+
+* `./mvnw clean verify` is the one command that must pass (Docker running); CI runs exactly that, then builds the image
+  and smoke-tests the whole system. JaCoCo fails the build under the coverage floor (pom).
+* The `Dockerfile` is multi-stage and layered, runs as non-root and health-checks the readiness probe. Required
+  environment: `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`, `JWT_SECRET`. Never bake a secret into the image or compose file.
+* Only `/actuator/health/**` is public and `management.endpoints.web.exposure.include` stays `health`: adding another
+  endpoint means deciding who may call it in `SecurityConfig`.
+* Dependencies are updated by Dependabot pull requests; merge them only when CI is green.
 
 ## Git
 

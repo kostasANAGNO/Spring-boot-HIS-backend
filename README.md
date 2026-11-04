@@ -21,6 +21,23 @@ SPRING_PROFILES_ACTIVE=local ./mvnw spring-boot:run          # API on http://loc
 
 Swagger UI (local profile only): <http://localhost:8080/swagger-ui.html> – use **Authorize** with the token from login.
 
+### The whole system in containers
+
+```bash
+# the application AND PostgreSQL, built from the Dockerfile (no JDK needed on your machine)
+JWT_SECRET=$(openssl rand -base64 48) docker compose --profile app up --build -d --wait
+curl localhost:8080/actuator/health          # {"status":"UP",...}
+docker compose --profile app down            # add -v to also drop the database volume
+```
+
+`JWT_SECRET` has no default on purpose: compose refuses to start without it (at least 32 characters). The image is a
+multi-stage build (JDK to build, a JRE-only runtime image), runs as a **non-root** user, is split into layers so a code
+change only rebuilds a small one, and has a health check on the readiness probe. No profile is active, so Swagger UI
+is off. Base images can be pinned or mirrored: `--build-arg BUILD_IMAGE=... --build-arg RUNTIME_IMAGE=...`.
+
+Only the health probes are public (`/actuator/health`, `/actuator/health/liveness`, `/actuator/health/readiness`,
+without details); no other actuator endpoint is exposed.
+
 ### Configuration (environment variables)
 
 | Variable | Purpose | Local default |
@@ -326,8 +343,29 @@ Their national ID stays reserved (it is unique across all rows).
 ./mvnw clean verify
 ```
 
-Includes unit tests (Patient service), a security matrix test (401/403/2xx per role) and a Testcontainers integration
-test that boots the app on PostgreSQL – **Docker must be running**.
+Includes the unit tests, the **architecture rules**, the security matrix tests and the Testcontainers integration test
+that boots the app on PostgreSQL (**Docker must be running**), then checks the **coverage floor**. The JaCoCo report is
+in `target/site/jacoco/index.html`.
+
+* **Architecture rules (ArchUnit)** - `src/test/java/.../architecture/HisArchRules.java`. They fail the build when, for
+  example, a controller uses a repository or returns an entity, an endpoint has no `@PreAuthorize`, an endpoint on
+  patient data has no `@Audited`, a service implementation is not `@Transactional`, a bean uses field injection or
+  holds mutable state, a DTO is not a record, or a to-one association is eager. A second test proves every rule really
+  fails on deliberately wrong sample classes (`src/test/java/com/example/archfixtures`). See `docs/CONVENTIONS.md`.
+* **Coverage floor** - the build fails below 90 % of lines or 70 % of branches (today about 95 % / 78 %); raise the
+  numbers in the `jacoco-maven-plugin` configuration as coverage grows.
+
+### Continuous integration
+
+`.github/workflows/`:
+
+| Workflow | When | What |
+|---|---|---|
+| `ci.yml` | every push to `main` and every pull request | `./mvnw verify` (all tests, architecture rules, coverage floor), test and coverage reports as artifacts, then builds the image, starts the whole system with compose and smoke-tests it (health, login, nothing else of the actuator exposed, non-root) |
+| `security.yml` | push, pull request, weekly | CodeQL static analysis and dependency review (only on public repositories, or with GitHub Advanced Security) |
+| `.github/dependabot.yml` | weekly | pull requests for Maven, GitHub Actions and Docker base-image updates, each checked by the full CI |
+
+Make `main` require the `CI` checks before merging (repository settings -> branch protection).
 
 ## Project layout
 
