@@ -11,10 +11,18 @@ import org.springframework.security.authentication.UsernamePasswordAuthenticatio
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
+/**
+ * Deliberately NOT transactional (and it suspends a caller's transaction): checking a password with BCrypt takes
+ * ~100 ms and must not hold a database connection. The few reads and the audit write it triggers run in their own
+ * short transactions.
+ */
 @Slf4j
 @Service
 @RequiredArgsConstructor
+@Transactional(propagation = Propagation.NOT_SUPPORTED)
 public class AuthServiceImpl implements AuthService {
 
     private final AuthenticationManager authenticationManager;
