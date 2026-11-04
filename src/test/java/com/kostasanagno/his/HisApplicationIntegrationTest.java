@@ -58,6 +58,21 @@ class HisApplicationIntegrationTest {
     private JdbcTemplate jdbc;
 
     @Test
+    void healthProbesArePublicAndNothingElseOfTheActuatorIs() throws Exception {
+        // load balancers and containers need these without a token
+        mockMvc.perform(get("/actuator/health")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("UP"));
+        mockMvc.perform(get("/actuator/health/liveness")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("UP"));
+        mockMvc.perform(get("/actuator/health/readiness")).andExpect(status().isOk()).andExpect(jsonPath("$.status").value("UP"))
+                .andExpect(jsonPath("$.components").doesNotExist());      // no database details for the public
+        // nothing else is reachable, not even by an admin
+        String admin = "Bearer " + login("admin", "Admin123!");
+        for (String endpoint : List.of("env", "beans", "metrics", "info", "loggers", "heapdump")) {
+            mockMvc.perform(get("/actuator/" + endpoint)).andExpect(status().isUnauthorized());
+            mockMvc.perform(get("/actuator/" + endpoint).header("Authorization", admin)).andExpect(status().is4xxClientError());
+        }
+    }
+
+    @Test
     void flywayMigrationsAreApplied() {
         List<String> versions = jdbc.queryForList(
                 "SELECT version FROM flyway_schema_history WHERE success ORDER BY installed_rank", String.class);

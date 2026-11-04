@@ -1,13 +1,13 @@
 package com.kostasanagno.his.config;
 
+import com.kostasanagno.his.security.CorsProperties;
 import com.kostasanagno.his.security.JwtAuthenticationFilter;
 import com.kostasanagno.his.security.JwtService;
 import com.kostasanagno.his.security.RestAccessDeniedHandler;
 import com.kostasanagno.his.security.RestAuthenticationEntryPoint;
-import java.util.Arrays;
 import java.util.List;
 import lombok.RequiredArgsConstructor;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -31,6 +31,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 @Configuration
 @EnableMethodSecurity
+@EnableConfigurationProperties(CorsProperties.class)
 @RequiredArgsConstructor
 public class SecurityConfig {
 
@@ -41,8 +42,7 @@ public class SecurityConfig {
     private final RestAuthenticationEntryPoint authenticationEntryPoint;
     private final RestAccessDeniedHandler accessDeniedHandler;
 
-    @Value("${app.cors.allowed-origins:}")
-    private String[] allowedOrigins;
+    private final CorsProperties corsProperties;
 
     @Bean
     SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -55,6 +55,8 @@ public class SecurityConfig {
                         .requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
                         // Only exposed by springdoc when the "local" profile enables it
                         .requestMatchers(SWAGGER_PATHS).permitAll()
+                        // Liveness/readiness probes for containers and load balancers; nothing else of the actuator is exposed
+                        .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**").permitAll()
                         // Checked before body validation, so non-admins get 403 rather than 400
                         .requestMatchers(HttpMethod.POST, "/api/auth/register").hasRole("ADMIN")
                         .requestMatchers("/api/**").authenticated()
@@ -89,7 +91,7 @@ public class SecurityConfig {
     @Bean
     CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(Arrays.stream(allowedOrigins).filter(o -> !o.isBlank()).toList());
+        configuration.setAllowedOrigins(corsProperties.allowedOrigins().stream().filter(o -> !o.isBlank()).toList());
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("Authorization", "Content-Type"));
         configuration.setMaxAge(3600L);
